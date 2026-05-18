@@ -2,13 +2,10 @@
 
 [English](README.md) | [中文](README.zh-CN.md)
 
-Generate Forza Horizon 6 Vinyl Group layers from images.
+Generate Forza Horizon 6 Vinyl Group layers from images. The desktop app handles generation, preview, and import in one place. Normal users do not need to type memory addresses.
 
-GPU generator reference code by @zjl88858: https://github.com/zjl88858/forza-painter-geometrize-gpu
-
-## Import Walkthrough Video
-
-https://www.bilibili.com/video/BV1hG5Z6nENZ
+> Import walkthrough video: https://www.bilibili.com/video/BV1hG5Z6nENZ  
+> GPU generator reference: https://github.com/zjl88858/forza-painter-geometrize-gpu
 
 This tool has two jobs:
 
@@ -17,15 +14,49 @@ This tool has two jobs:
 
 Normal use does not require manual memory addresses. For FH6 import, select the game process, enter the template layer count, then import.
 
-## Setup
+## Preview
+
+### App Import Page
+
+![App import page](docs/screenshots/app-import-preview.png)
+
+### Template Ready In FH6
+
+![FH6 template ready](docs/screenshots/fh6-template-ready.png)
+
+### Imported Result
+
+![FH6 import result](docs/screenshots/fh6-import-result.png)
+
+### Applied To Car
+
+![FH6 car applied result](docs/screenshots/fh6-car-applied.png)
+
+## Quick Start
 
 1. Download this repository as a ZIP and extract it.
 2. Install 64-bit Python. Python 3.12 is recommended.
-3. Open the extracted folder.
-4. Double-click `install_dependencies.bat`.
-5. Double-click `start_app.bat`.
+3. Double-click `install_dependencies.bat`.
+4. Double-click `start_app.bat`.
+5. In FH6, open Vinyl Group Editor, load a sphere template, then Ungroup it.
+6. Generate JSON in the app, open the Import page, enter the template layer count, then import.
 
-If the app does not start, run `check_environment.bat`.
+## Setup
+
+Most users only need to run:
+
+```text
+install_dependencies.bat
+start_app.bat
+```
+
+If the app does not start, run:
+
+```text
+check_environment.bat
+```
+
+The core Python app only needs `psutil` and `pywin32`. Image/JSON preview uses optional NumPy/OpenCV dependencies; the installer may skip them on Python versions where preview packages are likely to conflict.
 
 ## Generate JSON
 
@@ -44,7 +75,17 @@ image.1000.json
 image.3000.json
 ```
 
+One image can generate multiple checkpoint JSON files. Prefer the highest-layer JSON that matches your template; for example, use `image.3000.json` or the final `image.json` with a 3000-layer template. Importing a 500-layer JSON into a 3000-layer template will look blurry.
+
 The left panel can scroll. In small windows, the generate button stays fixed at the bottom.
+
+Recommended quality choices:
+
+| Goal | Recommendation |
+| --- | --- |
+| Quick composition test | Lower layers and a fast preset |
+| Normal use | balanced or slow |
+| Maximum clarity | Higher Output layers and a larger template |
 
 ## Quality And Custom Settings
 
@@ -86,6 +127,9 @@ Recommended template size: 500 to 3000 layers.
 
 The app locates and verifies the current FH6 layer table before writing. If the target cannot be verified safely, it stops before writing.
 
+> FH needs 4 extra boundary layers to save the cover and apply bounds correctly.  
+> Example: a 1000-layer JSON should use at least a 1004-layer template; a 3000-layer template can import about 2996 drawable shapes.
+
 ## Rules
 
 - The template must be ungrouped.
@@ -94,7 +138,20 @@ The app locates and verifies the current FH6 layer table before writing. If the 
 - After restarting the game, reloading the template, or changing layer count, import again with the new correct count.
 - If JSON has fewer layers than the template, unused template layers are hidden.
 - If JSON has more layers than the template, extra shapes are trimmed.
+- If the imported image looks blurry, you probably imported a low-layer checkpoint or generated too few output layers.
 - Transparent PNG backgrounds are not imported as visible backgrounds.
+
+## Changelog
+
+### 2026-05-18
+
+- JSON generation now uses the bundled GPU/OpenCL generator to reduce artifacts from the old generator.
+- The app now uses a standalone desktop window with generation, import, preview, and tutorial pages in one place.
+- The Generate page has quality presets plus in-app custom settings, so users no longer need to edit config files manually.
+- The Import page is simplified for normal users: select the game process, enter the template layer count, choose JSON, then import.
+- Fixed an FH6 issue where the design was visible in the editor but saved with a blank cover, pasted blank onto the car, or appeared blank after copying to another vinyl.
+- FH import now reserves 4 boundary layers so FH can calculate the saved cover and apply bounds correctly.
+- Added environment checks and troubleshooting notes for Python, OpenCL, permissions, and optional preview dependencies.
 
 ## Troubleshooting
 
