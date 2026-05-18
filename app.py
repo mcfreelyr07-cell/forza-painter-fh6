@@ -98,7 +98,8 @@ TEXT = {
         "locating": "Finding current FH6 template...",
         "located": "FH6 template located and verified.",
         "importing": "Importing JSON into FH6...",
-        "json_too_small": "Selected JSON has far fewer layers than the template. Import will look blurry; choose a higher-layer JSON.",
+        "json_too_small": "Selected JSON has far fewer drawable layers than the usable template capacity. Import will look blurry; choose a higher-layer JSON.",
+        "json_needs_more_template_layers": "FH needs 4 boundary layers for correct cover/apply behavior. Use a template with at least JSON drawable layers + 4.",
         "safe_stop": "Stopped before writing because no safe FH6 template was found.",
         "tutorial": """Beginner workflow
 
@@ -197,7 +198,8 @@ Notes
         "locating": "正在查找当前 FH6 模板...",
         "located": "已安全定位并验证 FH6 模板。",
         "importing": "正在导入 JSON 到 FH6...",
-        "json_too_small": "当前 JSON 层数远少于模板层数，导入会很糊；请换用更高层数的 JSON。",
+        "json_too_small": "当前 JSON 可绘制层数远少于模板可用容量，导入会很糊；请换用更高层数的 JSON。",
+        "json_needs_more_template_layers": "FH 需要预留 4 个边界层，才能正常保存封面和贴到车上。模板层数建议至少为 JSON 可绘制层数 + 4。",
         "safe_stop": "未找到安全 FH6 模板，已在写入前停止。",
         "tutorial": """小白流程
 
@@ -1019,8 +1021,11 @@ class App:
             template_layers = int(layer_count)
         except Exception:
             return
-        if json_layers and template_layers and json_layers < template_layers * 0.75:
-            self.queue.put(("log", f"{tr(self.lang, 'json_too_small')} JSON={json_layers}, template={template_layers}"))
+        usable_layers = max(0, template_layers - 4)
+        if json_layers and template_layers and json_layers > usable_layers:
+            self.queue.put(("log", f"{tr(self.lang, 'json_needs_more_template_layers')} JSON={json_layers}, template={template_layers}, usable={usable_layers}"))
+        if json_layers and usable_layers and json_layers < usable_layers * 0.75:
+            self.queue.put(("log", f"{tr(self.lang, 'json_too_small')} JSON={json_layers}, usable={usable_layers}"))
 
     def _friendly_subprocess_line(self, line):
         if not line:
