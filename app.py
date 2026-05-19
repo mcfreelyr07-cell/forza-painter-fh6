@@ -62,6 +62,7 @@ TEXT = {
         "preview_hint": "Select an image or JSON to preview it here.",
         "preview_unavailable": "Preview is unavailable. Install optional preview dependencies, or continue without preview.",
         "logs": "Logs",
+        "progress": "Progress",
         "json_files": "Geometry JSON files",
         "add_json": "Add JSON",
         "use_outputs": "Use generated JSON",
@@ -164,6 +165,7 @@ Notes
         "preview_hint": "选择图片或 JSON 后会在这里预览。",
         "preview_unavailable": "当前环境无法显示预览。可安装可选预览依赖，也可以直接继续生成或导入。",
         "logs": "日志",
+        "progress": "进度",
         "json_files": "Geometry JSON 文件",
         "add_json": "添加 JSON",
         "use_outputs": "使用已生成 JSON",
@@ -406,6 +408,7 @@ class App:
         self.custom_save_at = StringVar()
         self.translated = []
         self.status = StringVar(value=tr(self.lang, "ready"))
+        self.progress_text = StringVar(value="")
         self.selected_profile = StringVar()
         self.selected_game = StringVar(value="fh6")
         self.selected_pid = StringVar()
@@ -729,7 +732,11 @@ class App:
         self._update_tutorial()
 
     def _build_log(self):
-        self._label(self.root, "logs", anchor="w").pack(fill=X, padx=14)
+        row = Frame(self.root)
+        row.pack(fill=X, padx=14)
+        self._label(row, "logs", anchor="w").pack(side=LEFT)
+        self._label(row, "progress", anchor="e").pack(side=LEFT, padx=(18, 4))
+        Label(row, textvariable=self.progress_text, anchor="w", fg="#005a9e").pack(side=LEFT, fill=X, expand=True)
         self.log = Text(self.root, height=9)
         self.log.pack(fill=BOTH, padx=14, pady=(0, 12))
 
@@ -855,6 +862,18 @@ class App:
             return text
         return None
 
+    def queue_generator_message(self, friendly, last_message):
+        if not friendly or friendly == last_message:
+            return last_message
+        if friendly.startswith("Generated layer "):
+            self.queue.put(("progress", friendly))
+            self.queue.put(("log", friendly))
+            return friendly
+        if friendly == "FINISHED":
+            self.queue.put(("progress", friendly))
+        self.queue.put(("log", friendly))
+        return friendly
+
     def add_images(self):
         files = filedialog.askopenfilenames(
             title="Choose images",
@@ -964,6 +983,7 @@ class App:
             self.log_line(f"Missing generator: {GENERATOR_EXE}")
             return
         self.shutdown_event.clear()
+        self.progress_text.set("")
         self.status.set(tr(self.lang, "running"))
         threading.Thread(target=self._generate_worker, args=(setting,), daemon=True).start()
 
@@ -991,6 +1011,7 @@ class App:
                     cwd=ROOT,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
+                    bufsize=1,
                     text=True,
                     encoding="utf-8",
                     errors="replace",
@@ -1000,19 +1021,38 @@ class App:
 
                 last_preview = None
                 last_preview_mtime = None
-                last_progress_log = None
+                last_generator_message = None
+                output_queue = queue.Queue()
+
+                def _read_generator_output():
+                    try:
+                        for raw_line in proc.stdout:
+                            output_queue.put(raw_line)
+                    finally:
+                        output_queue.put(None)
+
+                reader = threading.Thread(target=_read_generator_output, daemon=True)
+                reader.start()
+
+                def _drain_generator_output():
+                    nonlocal last_generator_message
+                    while True:
+                        try:
+                            raw_line = output_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        if raw_line is None:
+                            continue
+                        friendly = self.friendly_generator_line(raw_line)
+                        last_generator_message = self.queue_generator_message(friendly, last_generator_message)
+
                 try:
                     while proc.poll() is None:
                         if self.shutdown_event.is_set():
                             self._terminate_process(proc)
                             self.queue.put(("status", tr(self.lang, "failed")))
                             return
-                        line = proc.stdout.readline()
-                        if line:
-                            friendly = self.friendly_generator_line(line)
-                            if friendly and friendly != last_progress_log:
-                                last_progress_log = friendly
-                                self.queue.put(("log", friendly))
+                        _drain_generator_output()
                         preview_files = generated_preview_files(image_path)
                         if preview_files:
                             newest_preview = preview_files[0]
@@ -1026,11 +1066,8 @@ class App:
                         time.sleep(0.1)
                     if self.shutdown_event.is_set():
                         return
-                    for line in proc.stdout.read().splitlines():
-                        friendly = self.friendly_generator_line(line)
-                        if friendly and friendly != last_progress_log:
-                            last_progress_log = friendly
-                            self.queue.put(("log", friendly))
+                    reader.join(timeout=1)
+                    _drain_generator_output()
                 finally:
                     self._unregister_process(proc)
                 if proc.returncode != 0:
@@ -1369,6 +1406,8 @@ class App:
                 break
             if kind == "log":
                 self.log_line(payload)
+            elif kind == "progress":
+                self.progress_text.set(payload)
             elif kind == "status":
                 self.status.set(payload)
             elif kind == "preview":
