@@ -22,7 +22,6 @@ $include = @(
     "check_environment.bat",
     "clean_runtime_data.bat",
     "LICENSE",
-    "LICENSE.geometrize-gpu",
     ".gitignore",
     "1. drag_image_file_here.bat",
     "start_app.bat",
