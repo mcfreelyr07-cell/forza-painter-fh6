@@ -1,42 +1,62 @@
-# forza-painter FH6
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/d4f48f71-d76e-4ffe-9fb1-0b075d79bf05" alt="forza-painter FH6 logo" width="720">
+</p>
 
-[English](README.md) | [中文](README.zh-CN.md)
+<h1 align="center">forza-painter FH6</h1>
 
-当前版本：`v1.1.1`
+<p align="center">
+  <strong>把图片转换成 Forza Horizon 6 Vinyl Group 的生成与导入工具。</strong>
+</p>
 
-把图片转换成 Forza Horizon 6 的 Vinyl Group 图层。软件内完成生成、预览和导入，普通用户不需要手动填写内存地址。
+<p align="center">
+  <a href="README.md">English</a> ·
+  <a href="README.zh-CN.md">中文</a>
+</p>
+
+<p align="center">
+  <code>v1.1.1</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code>
+</p>
+
+把 PNG/JPG/BMP 图片转换成 Forza Horizon 6 的 Vinyl Group 图层。软件内完成生成、预览和导入，普通用户不需要手动填写内存地址。
 
 > **画面发糊先看这里：** 优先提高生成页里的 `Random samples / 随机样本`。随机样本数在 **200000 以上** 通常会有明显质变；数值越高越清晰，但生成时间也会明显增加。
 
-> 导入参考视频：https://www.bilibili.com/video/BV1hG5Z6nENZ  
-> GPU 生成器参考：https://github.com/zjl88858/forza-painter-geometrize-gpu
+| 功能 | 说明 |
+| --- | --- |
+| 生成 JSON | 使用内置 GPU/OpenCL 生成器把图片转换成 geometry JSON。 |
+| 预览结果 | 在软件内预览原图和生成后的几何图形。 |
+| 导入 FH6 | 把 JSON 导入当前打开的 FH6 Vinyl Group Editor。 |
+| 安全写入 | 写入前自动定位并验证当前可编辑图层表。 |
 
-这个软件主要做两件事：
+## 资源链接
 
-- 把 PNG/JPG/BMP 图片生成 geometry JSON。
-- 把 JSON 导入到当前打开的 FH6 Vinyl Group Editor。
-
-生成 JSON 使用 GPU/OpenCL 版 geometrize 生成器。请保持显卡驱动正常；如果生成器提示 OpenCL 错误，优先修显卡驱动。
-
-正常使用不需要手动填写内存地址。FH6 只需要填写模板层数，软件会自动查找当前可编辑的图层组。
+- 导入参考视频：https://www.bilibili.com/video/BV1hG5Z6nENZ
+- 内置 GPU 生成器来源/参考：https://github.com/zjl88858/forza-painter-geometrize-gpu
 
 ## 效果预览
 
-### 软件导入页面
-
-![软件导入页面](docs/screenshots/app-import-preview.png)
-
-### 游戏里准备模板
-
-![FH6 模板准备](docs/screenshots/fh6-template-ready.png)
-
-### 导入完成效果
-
-![FH6 导入效果](docs/screenshots/fh6-import-result.png)
-
-### 贴到车身效果
-
-![FH6 车身贴图效果](docs/screenshots/fh6-car-applied.png)
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/app-import-preview.png" alt="软件导入页面"><br>
+      <strong>软件导入页面</strong>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/fh6-template-ready.png" alt="FH6 模板准备"><br>
+      <strong>游戏里准备模板</strong>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/fh6-import-result.png" alt="FH6 导入效果"><br>
+      <strong>导入完成效果</strong>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/fh6-car-applied.png" alt="FH6 车身贴图效果"><br>
+      <strong>贴到车身效果</strong>
+    </td>
+  </tr>
+</table>
 
 ## 快速开始
 
