@@ -535,60 +535,84 @@ def locate_clivery_groups_by_layout_count(pid, profile, layer_count, max_seconds
     groups = []
     candidates = 0
     scanned = 0
-    for base, size, _protect, _type in iter_regions(pid, type_filter=MEM_PRIVATE, writable_only=True):
+    chunk_size = 4 * 1024 * 1024
+    # Scan larger writable private regions first. FH6 can contain many unrelated
+    # layer-count-sized values; address-order scans may hit max_candidates before
+    # reaching the active LiveryGroup region on some systems.
+    regions = sorted(
+        iter_regions(pid, type_filter=MEM_PRIVATE, writable_only=True),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    for base, size, _protect, _type in regions:
         if max_seconds and time.monotonic() - started > max_seconds:
             print(f"Stopped FH6 layout-count scan after {max_seconds} seconds.", flush=True)
             break
-        memory = read_region(pid, base, size)
-        if not memory:
-            continue
-        scanned += len(memory)
-        start = 0
-        while True:
-            pos = memory.find(pattern, start)
-            if pos == -1:
+        offset = 0
+        carry = b""
+        while offset < size:
+            if max_seconds and time.monotonic() - started > max_seconds:
+                print(f"Stopped FH6 layout-count scan after {max_seconds} seconds.", flush=True)
                 break
-            start = pos + 1
-            candidates += 1
-            if candidates > max_candidates:
-                print(f"Stopped FH6 layout-count scan after {max_candidates} count hits.", flush=True)
-                return groups
-            count_address = base + pos
-            group_address = count_address - profile.livery_count_offset
-            if group_address < base:
+            to_read = min(chunk_size, size - offset)
+            chunk_base = base + offset
+            memory = read_process_memory(pid, chunk_base, to_read)
+            if memory:
+                scanned += len(memory)
+            if not memory or len(memory) < 2:
+                carry = b""
+                offset += to_read
                 continue
-            table_field = group_address + profile.layer_table_offset
-            try:
-                table_address = read_u64(pid, table_field)
-            except Exception:
-                continue
-            if not table_address or not is_user_pointer(table_address):
-                continue
-            if not is_private_writable_address(pid, table_address):
-                continue
-            score, samples = score_table(pid, profile, table_address, min(layer_count, 64))
-            if score <= 0:
-                continue
-            ok, checked, valid_entries = validate_table_layer_coverage(pid, profile, table_address, layer_count)
-            if not ok:
-                continue
-            groups.append({
-                "score": score + 60,
-                "group_address": group_address,
-                "count_address": count_address,
-                "table_pointer_field": table_field,
-                "table_address": table_address,
-                "count_kind": "u16_group_layout",
-                "current_u16": layer_count,
-                "current_u32": layer_count,
-                "samples": samples,
-                "validated_entries": valid_entries,
-            })
-            print(
-                f"layout candidate group=0x{group_address:x} count=0x{count_address:x} "
-                f"table=0x{table_address:x} validated={valid_entries}/{layer_count}",
-                flush=True,
-            )
+            scan_base = chunk_base - len(carry)
+            scan = carry + memory
+            start = 0
+            while True:
+                pos = scan.find(pattern, start)
+                if pos == -1:
+                    break
+                start = pos + 1
+                candidates += 1
+                if candidates > max_candidates:
+                    print(f"Stopped FH6 layout-count scan after {max_candidates} count hits.", flush=True)
+                    return groups
+                count_address = scan_base + pos
+                group_address = count_address - profile.livery_count_offset
+                if group_address < base:
+                    continue
+                table_field = group_address + profile.layer_table_offset
+                try:
+                    table_address = read_u64(pid, table_field)
+                except Exception:
+                    continue
+                if not table_address or not is_user_pointer(table_address):
+                    continue
+                if not is_private_writable_address(pid, table_address):
+                    continue
+                score, samples = score_table(pid, profile, table_address, min(layer_count, 64))
+                if score <= 0:
+                    continue
+                ok, checked, valid_entries = validate_table_layer_coverage(pid, profile, table_address, layer_count)
+                if not ok:
+                    continue
+                groups.append({
+                    "score": score + 60,
+                    "group_address": group_address,
+                    "count_address": count_address,
+                    "table_pointer_field": table_field,
+                    "table_address": table_address,
+                    "count_kind": "u16_group_layout",
+                    "current_u16": layer_count,
+                    "current_u32": layer_count,
+                    "samples": samples,
+                    "validated_entries": valid_entries,
+                })
+                print(
+                    f"layout candidate group=0x{group_address:x} count=0x{count_address:x} "
+                    f"table=0x{table_address:x} validated={valid_entries}/{layer_count}",
+                    flush=True,
+                )
+            carry = memory[-(len(pattern) - 1):]
+            offset += to_read
         if groups:
             break
     print(f"FH6 layout-count scan checked {scanned // (1024 * 1024)} MB, count hits={candidates}.", flush=True)
@@ -1285,7 +1309,7 @@ def main():
     parser.add_argument("--write-session", default=None, help="Write auto-located FH6 count/table session JSON.")
     parser.add_argument("--limit-mb", type=int, default=512, help="Readable/writable memory scan cap.")
     parser.add_argument("--max-matches", type=int, default=20000, help="Stop after this many raw count matches.")
-    parser.add_argument("--max-seconds", type=int, default=90, help="Stop after this many seconds.")
+    parser.add_argument("--max-seconds", type=int, default=120, help="Stop after this many seconds.")
     parser.add_argument("--progress-every", type=int, default=64, help="Print progress every N scanned MB.")
     args = parser.parse_args()
 

@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <code>v1.3.0</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code>
+  <code>v1.4.0</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code>
 </p>
 
 把 PNG/JPG/BMP 图片转换成 Forza Horizon 6 的 Vinyl Group 图层。软件内完成生成、预览和导入，普通用户不需要手动填写内存地址。
@@ -146,6 +146,16 @@ check_environment.bat
 - 如果导入后画面很糊，通常是导入了较低层数 checkpoint，或者生成时 `Output layers` 设置太低。
 
 ## 更新日志
+
+### v1.4.0 / 2026-05-21
+
+- 版本更新到 `v1.4.0`，发布包名称同步为 `forza-painter-fh6-v1.4.0.zip`。
+- 增加“导出详细日志”按钮，用户可以自行选择日志保存位置，导出内容上限为 50000 字符。
+- 详细日志会记录 helper/生成器原始输出、命令行、退出码、当前进程/模板状态和 session 信息，方便排查导入失败。
+- 改进 FH6 模板自动定位：大块可写 private 内存现在会按 4 MB 分块扫描，不再因为区域过大直接跳过。
+- FH6 层表扫描改为优先扫描更大的可写 private 内存区域，更接近已验证可用的 FH6-ready 导入器行为。
+- FH6 模板自动定位扫描上限提高到 120 秒，App 外层保护超时提高到 160 秒。
+- 增加过期游戏 PID 处理：选中的 FH6 进程不存在时会自动刷新进程列表，减少重启游戏后的误报。
 
 ### v1.3.0 / 2026-05-21
 

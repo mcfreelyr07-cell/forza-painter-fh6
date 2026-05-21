@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import platform
 import queue
 import re
 import subprocess
@@ -26,6 +27,10 @@ PROBE_DIR = ROOT / "webui-data" / "probes"
 SESSION_PATH = PROBE_DIR / "current-fh6-session.json"
 MEMORY_SNAPSHOT_LIMIT_MB = 2048
 PREVIEW_MAX = 520
+DETAILED_LOG_OUTPUT_LIMIT = 50000
+DETAILED_LOG_MEMORY_LIMIT = 120000
+FH6_AUTO_LOCATE_MAX_SECONDS = 120
+FH6_AUTO_LOCATE_TIMEOUT_SECONDS = 160
 _CV2_CACHE = None
 _CV2_ERROR = None
 
@@ -66,6 +71,7 @@ TEXT = {
         "preview_hint": "Select an image or JSON to preview it here.",
         "preview_unavailable": "Preview is unavailable. Install optional preview dependencies, or continue without preview.",
         "logs": "Logs",
+        "export_logs": "Export detailed log",
         "progress": "Progress",
         "json_files": "Geometry JSON files",
         "add_json": "Add JSON",
@@ -174,6 +180,7 @@ Notes
         "preview_hint": "选择图片或 JSON 后会在这里预览。",
         "preview_unavailable": "当前环境无法显示预览。可安装可选预览依赖，也可以直接继续生成或导入。",
         "logs": "日志",
+        "export_logs": "导出详细日志",
         "progress": "进度",
         "json_files": "Geometry JSON 文件",
         "add_json": "添加 JSON",
@@ -449,6 +456,9 @@ class App:
         self.custom_mutated_samples = StringVar()
         self.custom_save_at = StringVar()
         self.translated = []
+        self.detailed_log_lock = threading.Lock()
+        self.detailed_log_lines = deque()
+        self.detailed_log_chars = 0
         self.status = StringVar(value=tr(self.lang, "ready"))
         self.progress_text = StringVar(value="")
         self.selected_profile = StringVar()
@@ -790,6 +800,7 @@ class App:
         row = Frame(self.root)
         row.pack(fill=X, padx=14)
         self._label(row, "logs", anchor="w").pack(side=LEFT)
+        self._button(row, "export_logs", self.export_detailed_log).pack(side=RIGHT)
         self._label(row, "progress", anchor="e").pack(side=LEFT, padx=(18, 4))
         Label(row, textvariable=self.progress_text, anchor="w", fg="#005a9e").pack(side=LEFT, fill=X, expand=True)
         self.log = Text(self.root, height=9)
@@ -888,8 +899,112 @@ class App:
 
     def log_line(self, message):
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        self._record_detail(f"UI: {message}")
         self.log.insert(END, f"[{timestamp}] {message}\n")
         self.log.see(END)
+
+    def _record_detail(self, message):
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        text = str(message).rstrip()
+        entry = f"[{timestamp}] {text}"
+        with self.detailed_log_lock:
+            self.detailed_log_lines.append(entry)
+            self.detailed_log_chars += len(entry) + 1
+            while self.detailed_log_chars > DETAILED_LOG_MEMORY_LIMIT and self.detailed_log_lines:
+                removed = self.detailed_log_lines.popleft()
+                self.detailed_log_chars -= len(removed) + 1
+
+    def _format_command(self, cmd):
+        return subprocess.list2cmdline([str(item) for item in cmd])
+
+    def _diagnostic_log_header(self):
+        try:
+            profile = self._selected_setting()
+            profile_name = profile["label"] if profile else ""
+            profile_path = str(profile["path"]) if profile else ""
+        except Exception:
+            profile_name = ""
+            profile_path = ""
+        selected_pid = self.selected_pid_value()
+        generator_exists = GENERATOR_EXE.exists()
+        lines = [
+            f"{APP_DISPLAY_NAME} detailed log",
+            f"Generated at: {datetime.now().isoformat(timespec='seconds')}",
+            f"App version: {__version__}",
+            f"Python: {sys.version.replace(os.linesep, ' ')}",
+            f"Platform: {platform.platform()}",
+            f"Root: {ROOT}",
+            f"Generator: {GENERATOR_EXE} exists={generator_exists}",
+            f"Selected game: {self.selected_game.get()}",
+            f"Selected PID: {selected_pid}",
+            f"Selected process label: {self.selected_pid.get()}",
+            f"Template layer count: {self.layer_count.get()}",
+            f"Manual count address: {self.count_address.get()}",
+            f"Manual table address: {self.table_address.get()}",
+            f"Quality profile: {profile_name}",
+            f"Quality profile path: {profile_path}",
+            f"Custom settings enabled: {self.use_custom_settings.get()}",
+            f"Images: {len(self.images)}",
+            *[f"  image: {path}" for path in self.images],
+            f"JSON files: {len(self.json_files)}",
+            *[f"  json: {path}" for path in self.json_files],
+            f"Generated outputs: {len(self.outputs)}",
+            *[f"  output: {path}" for path in self.outputs],
+        ]
+        if SESSION_PATH.exists():
+            try:
+                session_text = SESSION_PATH.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                session_text = f"<failed to read session: {exc}>"
+            lines.extend(["Current FH6 session file:", session_text[:4000]])
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _build_detailed_log_text(self):
+        header = self._diagnostic_log_header()
+        try:
+            visible_log = self.log.get("1.0", END).strip()
+        except Exception:
+            visible_log = ""
+        with self.detailed_log_lock:
+            detail_log = "\n".join(self.detailed_log_lines).strip()
+        body = "\n\n".join(
+            section
+            for section in (
+                "=== Detailed Event Log ===\n" + (detail_log or "<empty>"),
+                "=== Visible UI Log ===\n" + (visible_log or "<empty>"),
+            )
+            if section
+        )
+        marker = f"\n\n--- Log truncated to last {DETAILED_LOG_OUTPUT_LIMIT} characters ---\n"
+        prefix = header + "\n"
+        budget = DETAILED_LOG_OUTPUT_LIMIT - len(prefix)
+        if budget <= len(marker):
+            result = (prefix + body)[-DETAILED_LOG_OUTPUT_LIMIT:]
+            return result if len(result) <= DETAILED_LOG_OUTPUT_LIMIT else result[-DETAILED_LOG_OUTPUT_LIMIT:]
+        if len(body) > budget:
+            body = marker + body[-(budget - len(marker)):]
+        result = (prefix + body).rstrip()
+        if len(result) >= DETAILED_LOG_OUTPUT_LIMIT:
+            result = result[:DETAILED_LOG_OUTPUT_LIMIT - 1]
+        return result + "\n"
+
+    def export_detailed_log(self):
+        initial = f"forza-painter-fh6-log-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+        output = filedialog.asksaveasfilename(
+            title="Export detailed log",
+            defaultextension=".txt",
+            initialfile=initial,
+            filetypes=[("Text log", "*.txt"), ("All files", "*.*")],
+        )
+        if not output:
+            return
+        text = self._build_detailed_log_text()
+        try:
+            Path(output).write_text(text, encoding="utf-8")
+        except OSError as exc:
+            self.log_line(f"Failed to export detailed log: {exc}")
+            return
+        self.log_line(f"Detailed log exported: {output} ({len(text)} chars, limit {DETAILED_LOG_OUTPUT_LIMIT}).")
 
     def _reset_generation_eta(self):
         self.eta_intervals.clear()
@@ -1129,6 +1244,31 @@ class App:
         except ValueError:
             return None
 
+    def _pid_matches_game(self, pid, game):
+        profile = PROFILES.get(game)
+        if not pid or not profile:
+            return False
+        try:
+            process_name = psutil.Process(pid).name().lower()
+        except psutil.Error:
+            return False
+        return process_name in [name.lower() for name in profile.process_names]
+
+    def ensure_live_game_pid(self):
+        game = self.selected_game.get() or "fh6"
+        pid = self.selected_pid_value()
+        if self._pid_matches_game(pid, game):
+            return pid
+        if pid:
+            self.log_line(f"Selected game process pid {pid} is no longer running; refreshing process list.")
+        self.refresh_processes()
+        game = self.selected_game.get() or game
+        pid = self.selected_pid_value()
+        if self._pid_matches_game(pid, game):
+            return pid
+        self.log_line("No live supported game process is selected. Start FH6, then click Refresh.")
+        return None
+
     def stop_generate(self):
         with self.generation_lock:
             if not self.generation_running:
@@ -1193,6 +1333,7 @@ class App:
                 self.queue.put(("preview", render_source_image(image_path)))
                 flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
                 cmd = build_generator_command(image_path, setting)
+                self._record_detail(f"GENERATOR COMMAND: {self._format_command(cmd)}")
                 self.queue.put(("log", f"Running GPU generator with {setting['path'].name}"))
                 if self.shutdown_event.is_set():
                     self.queue.put(("status", tr(self.lang, "stopped")))
@@ -1222,6 +1363,7 @@ class App:
                 def _read_generator_output():
                     try:
                         for raw_line in proc.stdout:
+                            self._record_detail(f"GENERATOR RAW: {raw_line.rstrip()}")
                             output_queue.put(raw_line)
                     finally:
                         output_queue.put(None)
@@ -1269,9 +1411,11 @@ class App:
                         if self.current_generator_proc is proc:
                             self.current_generator_proc = None
                 if proc.returncode != 0:
+                    self._record_detail(f"GENERATOR EXIT: {proc.returncode}")
                     self.queue.put(("log", self._generator_exit_message(proc.returncode)))
                     self.queue.put(("status", tr(self.lang, "failed")))
                     return
+                self._record_detail("GENERATOR EXIT: 0")
                 after = generated_jsons(image_path)
                 new_outputs = best_geometry_jsons([path for path in after if path.resolve() not in before])
                 if not new_outputs and after:
@@ -1309,11 +1453,13 @@ class App:
             os.startfile(folder)
 
     def run_subprocess(self, cmd, timeout=None):
+        self._record_detail(f"HELPER COMMAND: {self._format_command(cmd)}")
         self.queue.put(("log", self._friendly_command_name(cmd)))
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         env = os.environ.copy()
         env.update({"FORZA_PAINTER_NO_ELEVATE": "1", "FORZA_PAINTER_NO_PAUSE": "1"})
         if self.shutdown_event.is_set():
+            self._record_detail("HELPER EXIT: 130 before start")
             return 130
         proc = self._popen_registered(
             [str(x) for x in cmd],
@@ -1327,15 +1473,18 @@ class App:
             env=env,
         )
         if proc is None:
+            self._record_detail("HELPER EXIT: 130 no process")
             return 130
         started = time.time()
         try:
             while True:
                 if self.shutdown_event.is_set():
                     self._terminate_process(proc)
+                    self._record_detail("HELPER EXIT: 130 stopped")
                     return 130
                 line = proc.stdout.readline()
                 if line:
+                    self._record_detail(f"HELPER RAW: {line.rstrip()}")
                     friendly = self._friendly_subprocess_line(line.rstrip())
                     if friendly:
                         self.queue.put(("log", friendly))
@@ -1343,15 +1492,19 @@ class App:
                     break
                 if timeout and time.time() - started > timeout:
                     self._terminate_process(proc)
+                    self._record_detail(f"HELPER EXIT: 124 timeout after {timeout} seconds")
                     self.queue.put(("log", f"Timed out after {timeout} seconds."))
                     return 124
                 time.sleep(0.05)
             if self.shutdown_event.is_set():
+                self._record_detail("HELPER EXIT: 130 stopped after process exit")
                 return 130
             for line in proc.stdout.read().splitlines():
+                self._record_detail(f"HELPER RAW: {line.rstrip()}")
                 friendly = self._friendly_subprocess_line(line.rstrip())
                 if friendly:
                     self.queue.put(("log", friendly))
+            self._record_detail(f"HELPER EXIT: {proc.returncode}")
             return proc.returncode
         finally:
             self._unregister_process(proc)
@@ -1420,7 +1573,7 @@ class App:
         return raw
 
     def start_auto_locate(self):
-        pid = self.selected_pid_value()
+        pid = self.ensure_live_game_pid()
         layer_count = self.layer_count.get().strip()
         if not pid or not layer_count:
             self.log_line("PID and template layer count are required.")
@@ -1449,9 +1602,9 @@ class App:
             "--inspect-radius",
             "0x800",
             "--max-seconds",
-            "45",
+            str(FH6_AUTO_LOCATE_MAX_SECONDS),
         ]
-        code = self.run_subprocess(cmd, timeout=70)
+        code = self.run_subprocess(cmd, timeout=FH6_AUTO_LOCATE_TIMEOUT_SECONDS)
         located = False
         if code == 0 and SESSION_PATH.exists():
             session = load_session_location()
@@ -1465,7 +1618,9 @@ class App:
         if not self.json_files:
             self.log_line("No JSON files selected.")
             return
-        pid = self.selected_pid_value()
+        pid = self.ensure_live_game_pid()
+        if not pid:
+            return
         self.status.set(tr(self.lang, "running"))
         threading.Thread(target=self._import_worker, args=(pid,), daemon=True).start()
 
@@ -1511,7 +1666,7 @@ class App:
         self.queue.put(("status", tr(self.lang, "done")))
 
     def start_diagnose(self):
-        pid = self.selected_pid_value()
+        pid = self.ensure_live_game_pid()
         cmd = [sys.executable, APP_DIR / "main.py", "--game", self.selected_game.get() or "fh6", "--diagnose"]
         if pid:
             cmd.extend(["--pid", str(pid)])
@@ -1519,7 +1674,7 @@ class App:
         threading.Thread(target=lambda: self._run_command_worker(cmd, 120), daemon=True).start()
 
     def start_save_snapshot(self):
-        pid = self.selected_pid_value()
+        pid = self.ensure_live_game_pid()
         count = self.snapshot_count.get().strip() or self.layer_count.get().strip()
         if not pid or not count:
             self.log_line("PID and snapshot layer count are required.")
@@ -1543,7 +1698,7 @@ class App:
         threading.Thread(target=lambda: self._run_command_worker(cmd, 360), daemon=True).start()
 
     def start_compare_snapshot(self):
-        pid = self.selected_pid_value()
+        pid = self.ensure_live_game_pid()
         previous = self.snapshot_count.get().strip()
         current = self.current_count.get().strip() or self.layer_count.get().strip()
         if not pid or not previous or not current:
@@ -1574,7 +1729,7 @@ class App:
         threading.Thread(target=lambda: self._run_command_worker(cmd, 360), daemon=True).start()
 
     def start_inspect_table(self):
-        pid = self.selected_pid_value()
+        pid = self.ensure_live_game_pid()
         table = self.inspect_table_value.get().strip()
         count = self.layer_count.get().strip()
         if not pid or not table or not count:

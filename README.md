@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <code>v1.3.0</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code>
+  <code>v1.4.0</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code>
 </p>
 
 Generate Forza Horizon 6 Vinyl Group layers from PNG/JPG/BMP images. The desktop app handles generation, preview, and import in one place; normal users do not need to type memory addresses.
@@ -168,6 +168,16 @@ The app locates and verifies the current FH6 layer table before writing. If the 
 - Transparent PNG backgrounds are not imported as visible backgrounds.
 
 ## Changelog
+
+### v1.4.0 / 2026-05-21
+
+- Updated the app version to `v1.4.0`; release packages now use `forza-painter-fh6-v1.4.0.zip`.
+- Added an `Export detailed log` button that lets users choose where to save a diagnostic log capped at 50000 characters.
+- Detailed logs now include raw helper/generator output, command lines, exit codes, selected process/template state, and current session details.
+- Improved FH6 template auto-location by scanning large writable private memory regions in 4 MB chunks instead of skipping them.
+- Changed FH6 layout scanning to prioritize larger writable private regions first, matching the working FH6-ready importer behavior more closely.
+- Raised the FH6 template auto-locate scan limit to 120 seconds, with an outer app watchdog timeout of 160 seconds.
+- Added stale game PID handling so the app refreshes the process list when the selected FH6 process no longer exists.
 
 ### v1.3.0 / 2026-05-21
 
