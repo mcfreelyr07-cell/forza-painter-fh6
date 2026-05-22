@@ -1,9 +1,11 @@
 import argparse
+import io
 import json
 import os
 import platform
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -21,7 +23,7 @@ import psutil
 from app_paths import ROOT, SOURCE_DIR
 from game_profiles import PROFILES
 from geometry_json import RECTANGLE, ROTATED_ELLIPSE, load_normalized_geometry
-from generator_backend import GENERATOR_EXE, best_geometry_jsons, build_generator_command, generated_jsons, generated_preview_files, generator_preview_path, load_settings, write_custom_settings
+from generator_backend import GENERATOR_EXE, USER_SETTINGS_DIR, best_geometry_jsons, build_generator_command, generated_jsons, generated_preview_files, generator_preview_path, load_settings, write_custom_settings, write_user_settings_preset
 from version import APP_DISPLAY_NAME, __version__, app_title
 
 
@@ -52,6 +54,8 @@ COLOR_BUTTON = "#263241"
 COLOR_BUTTON_ACTIVE = "#334456"
 _CV2_CACHE = None
 _CV2_ERROR = None
+_PIL_CACHE = None
+_PIL_ERROR = None
 
 LANGUAGES = {
     "English": "en",
@@ -73,13 +77,17 @@ TEXT = {
         "tutorial_tab": "Tutorial",
         "images": "Images",
         "add_images": "Add images",
+        "remove_image": "Remove selected image",
         "quality": "Quality profile",
+        "import_preset": "Import preset",
+        "open_preset_folder": "Open preset folder",
         "custom_settings": "Use custom settings",
         "custom_layers": "Output layers",
         "custom_resolution": "Max resolution",
         "custom_random": "Random samples",
         "custom_mutated": "Mutated samples",
         "custom_save_at": "Save checkpoints",
+        "save_custom_preset": "Save as preset",
         "custom_panel_title": "Custom settings",
         "custom_panel_hint": "The selected preset fills these values. Enable custom settings if you want to edit them before generating.",
         "generate_step_image": "Step 1 - Choose images",
@@ -100,6 +108,7 @@ TEXT = {
         "progress": "Progress",
         "json_files": "Geometry JSON files",
         "add_json": "Add JSON",
+        "remove_json": "Remove selected JSON",
         "use_outputs": "Use generated JSON",
         "step_game": "Step 1 - Game",
         "step_game_hint": "Start FH6, open Vinyl Group Editor, load an ungrouped sphere template, then refresh the process list.",
@@ -139,6 +148,14 @@ TEXT = {
         "no_generation_running": "No generation is running.",
         "stopping_generation": "Stopping current generation...",
         "generation_stopped": "Generation stopped.",
+        "generator_recycled_layers": "Generator recycled fully covered layers after {max_layer}/{total}; continuing. This is normal and is not a full restart.",
+        "existing_checkpoints_found": "Found existing checkpoint JSON for {image}: {count} file(s). Added the best one to Import.",
+        "checkpoint_available_after_failure": "Saved checkpoint is available despite the failed/stopped run: {path}",
+        "imported_presets": "Imported {count} preset file(s).",
+        "saved_preset": "Saved preset: {path}",
+        "no_image_selected": "No image is selected.",
+        "no_json_selected": "No JSON is selected.",
+        "cannot_resume_checkpoint": "Existing checkpoints can be reused/imported, but this GPU generator does not support true resume-from-checkpoint yet.",
         "locating": "Finding current FH6 template...",
         "locating_wait": "This can take up to 5 minutes. Keep FH6 in the Vinyl Group Editor, do not switch menus, and wait patiently.",
         "located": "FH6 template located and verified.",
@@ -159,25 +176,23 @@ TEXT = {
         "runtime_location": "Runtime/cache files are stored beside the app: {runtime}. FH6 probe cache: {probe}.",
         "tutorial": """Beginner workflow
 
-1. Install 64-bit Python 3.12 if possible, then run install_dependencies.bat.
-   NumPy/OpenCV preview is optional; generation and import do not require it.
-   JSON generation uses the bundled GPU/OpenCL generator, so keep the graphics driver updated.
+1. Download the one-file EXE from GitHub Releases and run it directly. Normal users do not need Python, .venv, or batch files.
 
 2. Start Forza Horizon 6 and enter Create Vinyl Group / Vinyl Group Editor.
 
 3. Load or create a template made of many simple sphere layers. 500 or more layers is recommended. Ungroup the template before importing.
 
-4. In this app, open Generate JSON, add a PNG/JPG/BMP image, choose a quality profile, then click Start generating. If preview dependencies are available, the preview area shows the source image first, then the generated geometry preview when JSON appears.
+4. In this app, open Generate JSON, add a PNG/JPG/BMP image, choose a quality profile, then click Start generating.
 
 5. Open Import. Add the generated JSON or click Use generated JSON. Keep Game profile as Forza Horizon 6.
 
 6. Enter the real template layer count currently loaded in-game. For FH6 you normally do not need to type memory addresses. Click Import JSON; the app will auto-locate the live FH6 layer table if needed.
 
-7. If import fails with OpenProcess or permission errors, close the app and run it as administrator. If the game was restarted, entered another menu, or reloaded the template, run Auto-locate FH6 again or import again with the correct layer count.
+7. If import fails with OpenProcess or permission errors, close the app and run the EXE as administrator. If the game was restarted, entered another menu, or reloaded the template, import again with the correct layer count.
 
 Notes
 
-- The old FH5 signature chain is kept for compatibility, but FH6/Steam builds should use runtime auto-location.
+- JSON generation uses the bundled GPU/OpenCL generator, so keep the graphics driver updated.
 - Current FH6 addresses are valid only for the current game process and editor state.
 - If the app cannot find a safe template, confirm the editor is open, the template is ungrouped, and the layer count is exact.
 """,
@@ -194,13 +209,17 @@ Notes
         "tutorial_tab": "教程",
         "images": "图片",
         "add_images": "添加图片",
+        "remove_image": "移除选中图片",
         "quality": "品质配置",
+        "import_preset": "导入预设",
+        "open_preset_folder": "打开预设目录",
         "custom_settings": "使用自定义参数",
         "custom_layers": "输出层数",
         "custom_resolution": "最大分辨率",
         "custom_random": "随机样本",
         "custom_mutated": "变异样本",
         "custom_save_at": "保存节点",
+        "save_custom_preset": "保存为预设",
         "custom_panel_title": "自定义参数",
         "custom_panel_hint": "上方预设会自动填入这些参数；勾选使用自定义参数后可直接修改。",
         "generate_step_image": "第 1 步 - 选择图片",
@@ -221,6 +240,7 @@ Notes
         "progress": "进度",
         "json_files": "Geometry JSON 文件",
         "add_json": "添加 JSON",
+        "remove_json": "移除选中 JSON",
         "use_outputs": "使用已生成 JSON",
         "step_game": "第 1 步 - 游戏",
         "step_game_hint": "启动 FH6，进入 Vinyl Group Editor，载入未分组的球形模板，然后刷新进程列表。",
@@ -260,6 +280,14 @@ Notes
         "no_generation_running": "当前没有正在生成的任务。",
         "stopping_generation": "正在中断当前生成...",
         "generation_stopped": "生成已中断。",
+        "generator_recycled_layers": "生成器在 {max_layer}/{total} 后回收了被完全遮挡的旧图层，正在继续。这是正常回收，不是重新开始。",
+        "existing_checkpoints_found": "发现 {image} 已有 checkpoint JSON：{count} 个，已把最合适的一个加入导入列表。",
+        "checkpoint_available_after_failure": "虽然本次生成失败/中断，但已有 checkpoint 可用：{path}",
+        "imported_presets": "已导入 {count} 个预设文件。",
+        "saved_preset": "已保存预设：{path}",
+        "no_image_selected": "没有选中图片。",
+        "no_json_selected": "没有选中 JSON。",
+        "cannot_resume_checkpoint": "已有 checkpoint 可以复用/导入，但当前 GPU 生成器还不支持真正从 checkpoint 继续生成。",
         "locating": "正在查找当前 FH6 模板...",
         "locating_wait": "这一步最长可能需要 5 分钟。请保持 FH6 停留在 Vinyl Group Editor，不要切换菜单，耐心等待。",
         "located": "已安全定位并验证 FH6 模板。",
@@ -280,25 +308,23 @@ Notes
         "runtime_location": "运行缓存文件会保存在软件旁边：{runtime}。FH6 定位缓存：{probe}。",
         "tutorial": """小白流程
 
-1. 尽量安装 64 位 Python 3.12，然后运行 install_dependencies.bat。
-   NumPy/OpenCV 预览是可选功能；生成和导入不依赖它。
-   JSON 生成使用自带的 GPU/OpenCL 生成器，请保持显卡驱动正常。
+1. 从 GitHub Releases 下载单文件 EXE，直接运行。普通用户不需要 Python、.venv 或 bat 文件。
 
 2. 启动 Forza Horizon 6，进入 Create Vinyl Group / Vinyl Group Editor。
 
 3. 载入或新建一个由大量 sphere 图层组成的模板。建议 500 层以上。导入前必须先 ungroup。
 
-4. 在本软件的“生成 JSON”页添加 PNG/JPG/BMP 图片，选择品质配置，点击“开始生成”。如果预览依赖可用，预览区会先显示原图，JSON 出现后显示生成后的几何预览。
+4. 在本软件的“生成 JSON”页添加 PNG/JPG/BMP 图片，选择品质配置，点击“开始生成”。
 
 5. 打开“导入”页，添加生成的 JSON，或点击“使用已生成 JSON”。游戏 profile 保持 Forza Horizon 6。
 
 6. 填写游戏里当前模板的真实层数。FH6 通常不需要手动填写内存地址。点击“导入 JSON”，软件会在需要时自动定位当前 FH6 图层表。
 
-7. 如果日志提示 OpenProcess 或权限失败，请关闭软件，用管理员身份重新运行。如果重启过游戏、切换过菜单或重新加载模板，需要用正确层数重新自动定位或重新导入。
+7. 如果日志提示 OpenProcess 或权限失败，请关闭软件，用管理员身份重新运行 EXE。如果重启过游戏、切换过菜单或重新加载模板，请用正确层数重新导入。
 
 说明
 
-- 旧 FH5 签名链仍保留用于兼容；FH6/Steam 构建优先使用运行时自动定位。
+- JSON 生成使用自带的 GPU/OpenCL 生成器，请保持显卡驱动正常。
 - FH6 地址只对当前游戏进程和当前编辑器状态有效。
 - 如果软件找不到安全模板，请确认编辑器仍然打开、模板已经 ungroup、层数填写完全正确。
 """,
@@ -315,13 +341,17 @@ Notes
         "tutorial_tab": "튜토리얼",
         "images": "이미지",
         "add_images": "이미지 추가",
+        "remove_image": "선택한 이미지 제거",
         "quality": "품질 프로필",
+        "import_preset": "프리셋 가져오기",
+        "open_preset_folder": "프리셋 폴더 열기",
         "custom_settings": "사용자 설정 사용",
         "custom_layers": "출력 레이어",
         "custom_resolution": "최대 해상도",
         "custom_random": "무작위 샘플",
         "custom_mutated": "변형 샘플",
         "custom_save_at": "체크포인트 저장",
+        "save_custom_preset": "프리셋으로 저장",
         "custom_panel_title": "사용자 설정",
         "custom_panel_hint": "선택한 프리셋 값이 자동으로 채워집니다. 생성 전에 값을 바꾸려면 사용자 설정을 켜세요.",
         "generate_step_image": "1단계 - 이미지 선택",
@@ -342,6 +372,7 @@ Notes
         "progress": "진행 상황",
         "json_files": "Geometry JSON 파일",
         "add_json": "JSON 추가",
+        "remove_json": "선택한 JSON 제거",
         "use_outputs": "생성된 JSON 사용",
         "step_game": "1단계 - 게임",
         "step_game_hint": "FH6를 실행하고 비닐 그룹 편집기를 연 뒤, 그룹 해제된 구체 템플릿을 불러오고 프로세스 목록을 새로고침하세요.",
@@ -381,6 +412,14 @@ Notes
         "no_generation_running": "현재 실행 중인 생성 작업이 없습니다.",
         "stopping_generation": "현재 생성을 중지하는 중...",
         "generation_stopped": "생성이 중지되었습니다.",
+        "generator_recycled_layers": "생성기가 {max_layer}/{total} 이후 완전히 가려진 이전 레이어를 재활용했습니다. 정상 동작이며 처음부터 다시 시작한 것이 아닙니다.",
+        "existing_checkpoints_found": "{image}의 기존 checkpoint JSON {count}개를 찾았습니다. 가장 적합한 파일을 가져오기 목록에 추가했습니다.",
+        "checkpoint_available_after_failure": "이번 생성이 실패/중지되었지만 저장된 checkpoint를 사용할 수 있습니다: {path}",
+        "imported_presets": "{count}개 프리셋 파일을 가져왔습니다.",
+        "saved_preset": "프리셋을 저장했습니다: {path}",
+        "no_image_selected": "선택한 이미지가 없습니다.",
+        "no_json_selected": "선택한 JSON이 없습니다.",
+        "cannot_resume_checkpoint": "기존 checkpoint는 재사용/가져오기할 수 있지만 현재 GPU 생성기는 진정한 checkpoint 이어하기를 아직 지원하지 않습니다.",
         "locating": "현재 FH6 템플릿을 찾는 중...",
         "locating_wait": "최대 5분 정도 걸릴 수 있습니다. FH6를 Vinyl Group Editor에 그대로 두고 메뉴를 전환하지 말고 기다려 주세요.",
         "located": "FH6 템플릿을 찾고 검증했습니다.",
@@ -401,25 +440,23 @@ Notes
         "runtime_location": "런타임/캐시 파일은 앱 옆에 저장됩니다: {runtime}. FH6 probe cache: {probe}.",
         "tutorial": """초보자용 작업 순서
 
-1. 가능하면 64비트 Python 3.12를 설치한 뒤 install_dependencies.bat을 실행하세요.
-   NumPy/OpenCV 미리보기는 선택 기능입니다. 생성과 가져오기는 이 의존성 없이도 동작합니다.
-   JSON 생성은 포함된 GPU/OpenCL 생성기를 사용하므로 그래픽 드라이버를 최신 상태로 유지하세요.
+1. GitHub Releases에서 단일 EXE를 다운로드해 바로 실행하세요. 일반 사용자는 Python, .venv, bat 파일이 필요 없습니다.
 
 2. Forza Horizon 6를 실행하고 Create Vinyl Group / Vinyl Group Editor로 들어갑니다.
 
 3. 많은 단순 sphere 레이어로 만든 템플릿을 불러오거나 새로 만드세요. 500개 이상의 레이어를 권장합니다. 가져오기 전에는 반드시 템플릿을 ungroup해야 합니다.
 
-4. 이 앱의 JSON 생성 페이지에서 PNG/JPG/BMP 이미지를 추가하고 품질 프로필을 선택한 뒤 생성 시작을 클릭하세요. 미리보기 의존성이 있으면 미리보기 영역에 원본 이미지가 먼저 표시되고, JSON이 만들어지면 생성된 geometry 미리보기가 표시됩니다.
+4. 이 앱의 JSON 생성 페이지에서 PNG/JPG/BMP 이미지를 추가하고 품질 프로필을 선택한 뒤 생성을 시작하세요.
 
 5. 가져오기 페이지를 여세요. 생성된 JSON을 추가하거나 생성된 JSON 사용을 클릭하세요. 게임 프로필은 Forza Horizon 6로 둡니다.
 
 6. 현재 게임에 불러온 템플릿의 실제 레이어 수를 입력하세요. FH6에서는 보통 메모리 주소를 직접 입력할 필요가 없습니다. JSON 가져오기를 클릭하면 필요할 때 앱이 현재 FH6 레이어 테이블을 자동으로 찾습니다.
 
-7. OpenProcess 또는 권한 오류가 보이면 앱을 닫고 관리자 권한으로 다시 실행하세요. 게임을 다시 시작했거나, 다른 메뉴로 이동했거나, 템플릿을 다시 불러왔다면 정확한 레이어 수로 다시 자동 찾기 또는 가져오기를 실행하세요.
+7. OpenProcess 또는 권한 오류가 보이면 앱을 닫고 EXE를 관리자 권한으로 다시 실행하세요. 게임을 다시 시작했거나 메뉴를 바꿨다면 정확한 레이어 수로 다시 가져오세요.
 
 참고
 
-- 기존 FH5 시그니처 체인은 호환성을 위해 유지됩니다. FH6/Steam 빌드는 런타임 자동 찾기를 우선 사용해야 합니다.
+- JSON 생성은 포함된 GPU/OpenCL 생성기를 사용하므로 그래픽 드라이버를 최신 상태로 유지하세요.
 - 현재 FH6 주소는 현재 게임 프로세스와 현재 편집기 상태에서만 유효합니다.
 - 앱이 안전한 템플릿을 찾지 못하면 편집기가 열려 있는지, 템플릿이 ungroup 상태인지, 레이어 수가 정확한지 확인하세요.
 """,
@@ -581,6 +618,21 @@ def load_cv2():
         return None
 
 
+def load_pillow():
+    global _PIL_CACHE, _PIL_ERROR
+    if _PIL_CACHE is not None:
+        return _PIL_CACHE
+    if _PIL_ERROR is not None:
+        return None
+    try:
+        from PIL import Image, ImageDraw
+        _PIL_CACHE = (Image, ImageDraw)
+        return _PIL_CACHE
+    except BaseException as exc:
+        _PIL_ERROR = exc
+        return None
+
+
 def resize_keep_aspect(image, max_size=PREVIEW_MAX):
     loaded = load_cv2()
     if not loaded:
@@ -605,21 +657,40 @@ def image_to_photo(image):
     return encoded.tobytes()
 
 
-def render_source_image(path):
-    loaded = load_cv2()
+def pil_to_photo(image):
+    loaded = load_pillow()
     if not loaded:
         return None
-    cv2, _np = loaded
-    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
-    if image is None:
+    Image, _ImageDraw = loaded
+    image = image.convert("RGB")
+    image.thumbnail((PREVIEW_MAX, PREVIEW_MAX), Image.Resampling.LANCZOS)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def render_source_image(path):
+    loaded = load_cv2()
+    if loaded:
+        cv2, _np = loaded
+        image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if image is not None:
+            return image_to_photo(image)
+    loaded = load_pillow()
+    if not loaded:
         return None
-    return image_to_photo(image)
+    Image, _ImageDraw = loaded
+    try:
+        with Image.open(path) as image:
+            return pil_to_photo(image)
+    except Exception:
+        return None
 
 
 def render_geometry_json(path):
     loaded = load_cv2()
     if not loaded:
-        return None
+        return render_geometry_json_pillow(path)
     cv2, np = loaded
     try:
         data = load_normalized_geometry(path)
@@ -659,6 +730,60 @@ def render_geometry_json(path):
         return None
 
 
+def render_geometry_json_pillow(path):
+    loaded = load_pillow()
+    if not loaded:
+        return None
+    Image, ImageDraw = loaded
+    try:
+        data = load_normalized_geometry(path)
+        shapes = data["shapes"]
+        image_w, image_h = [int(v) for v in shapes[0]["data"][2:]]
+        bg_r, bg_g, bg_b, bg_a = [int(v) for v in shapes[0]["color"]]
+        scale = min(PREVIEW_MAX / max(image_w, image_h), 1.0)
+        preview_w = max(1, int(round(image_w * scale)))
+        preview_h = max(1, int(round(image_h * scale)))
+        if bg_a > 0:
+            preview = Image.new("RGB", (preview_w, preview_h), (bg_r, bg_g, bg_b))
+        else:
+            preview = Image.new("RGB", (preview_w, preview_h), (38, 38, 38))
+            draw_bg = ImageDraw.Draw(preview)
+            tile = max(8, int(round(32 * scale)))
+            for y in range(0, preview_h, tile):
+                for x in range(0, preview_w, tile):
+                    if ((x // tile) + (y // tile)) % 2 == 0:
+                        draw_bg.rectangle((x, y, min(preview_w, x + tile), min(preview_h, y + tile)), fill=(58, 58, 58))
+        draw = ImageDraw.Draw(preview)
+        for shape in shapes[1:]:
+            color = [int(v) for v in shape.get("color", [])]
+            if len(color) == 4 and color[3] <= 0:
+                continue
+            r, g, b, _a = color
+            shape_type = int(shape.get("type", 0))
+            if shape_type == RECTANGLE:
+                x, y, w, h = [float(v) for v in shape["data"]]
+                x0 = int(round((x - w / 2) * scale))
+                y0 = int(round((y - h / 2) * scale))
+                x1 = int(round((x + w / 2) * scale))
+                y1 = int(round((y + h / 2) * scale))
+                draw.rectangle((x0, y0, x1, y1), fill=(r, g, b))
+            elif shape_type == ROTATED_ELLIPSE:
+                x, y, w, h, rot_deg = [float(v) for v in shape["data"]]
+                cx = x * scale
+                cy = y * scale
+                rx = max(1, int(round(h * scale)))
+                ry = max(1, int(round(w * scale)))
+                mask = Image.new("L", (rx * 2 + 4, ry * 2 + 4), 0)
+                mask_draw = ImageDraw.Draw(mask)
+                mask_draw.ellipse((2, 2, rx * 2 + 2, ry * 2 + 2), fill=255)
+                mask = mask.rotate(-90 + rot_deg, resample=Image.Resampling.BICUBIC, expand=True)
+                colored = Image.new("RGB", mask.size, (r, g, b))
+                preview.paste(colored, (int(round(cx - mask.width / 2)), int(round(cy - mask.height / 2))), mask)
+        return pil_to_photo(preview)
+    except Exception:
+        return None
+
+
 class App:
     def __init__(self, initial_images):
         ensure_dirs()
@@ -680,6 +805,8 @@ class App:
         self.eta_last_time = None
         self.eta_smoothed_seconds_per_layer = None
         self.eta_display_remaining = None
+        self.eta_max_layer_seen = None
+        self.eta_recycle_notice_active = False
         self.closed = False
         self.settings = load_settings()
         self.images = [Path(path) for path in initial_images if Path(path).exists()]
@@ -719,6 +846,8 @@ class App:
         if self.settings:
             self.selected_profile.set(self.settings[min(2, len(self.settings) - 1)]["label"])
             self._update_setting_description()
+        for image_path in list(self.images):
+            self._load_existing_checkpoints_for_image(image_path)
         self._render_lists()
         self.log_line(tr(self.lang, "runtime_location").format(runtime=ROOT / "runtime", probe=PROBE_DIR.parent))
         self._poll_queue()
@@ -1059,6 +1188,7 @@ class App:
         row.pack(fill=X, padx=10, pady=(6, 2))
         self._label(row, "images").pack(side=LEFT)
         self._button(row, "add_images", self.add_images).pack(side=RIGHT)
+        self._button(row, "remove_image", self.remove_selected_image).pack(side=RIGHT, padx=8)
         self.image_list = Listbox(step1, height=3)
         self.image_list.pack(fill=X, padx=10, pady=(2, 8))
         self.image_list.bind("<<ListboxSelect>>", self._preview_selected_image)
@@ -1078,6 +1208,10 @@ class App:
         )
         self.profile_combo.pack(side=LEFT, fill=X, expand=True, padx=(8, 0))
         self.profile_combo.bind("<<ComboboxSelected>>", self._update_setting_description)
+        preset_actions = Frame(step2)
+        preset_actions.pack(fill=X, padx=10, pady=(0, 6))
+        self._button(preset_actions, "import_preset", self.import_preset).pack(side=LEFT)
+        self._button(preset_actions, "open_preset_folder", self.open_preset_folder).pack(side=LEFT, padx=8)
         self.setting_description = Label(step2, text="", anchor="w", justify=LEFT, wraplength=500)
         self.setting_description.pack(fill=X, padx=10, pady=(0, 8))
 
@@ -1112,6 +1246,9 @@ class App:
             entry.grid(row=row_index, column=1, sticky="ew", pady=1)
             self.custom_fields.append(entry)
         custom_grid.columnconfigure(1, weight=1)
+        custom_actions = Frame(custom_section)
+        custom_actions.pack(fill=X, padx=10, pady=(0, 8))
+        self._button(custom_actions, "save_custom_preset", self.save_custom_preset).pack(side=LEFT)
         self._sync_custom_state()
 
         step3 = ttk.LabelFrame(left_outer, text=tr(self.lang, "generate_step_run"))
@@ -1167,6 +1304,7 @@ class App:
         row.pack(fill=X, padx=10)
         self._label(row, "json_files").pack(side=LEFT)
         self._button(row, "add_json", self.add_json).pack(side=RIGHT)
+        self._button(row, "remove_json", self.remove_selected_json).pack(side=RIGHT, padx=(8, 0))
         self._button(row, "use_outputs", self.use_generated_outputs).pack(side=RIGHT, padx=8)
         self.json_list = Listbox(step3, height=10)
         self.json_list.pack(fill=BOTH, expand=True, padx=10, pady=6)
@@ -1284,6 +1422,9 @@ class App:
         setting = self._selected_setting()
         if not setting or self.use_custom_settings.get() != "1":
             return setting
+        return write_custom_settings(setting, self._custom_values())
+
+    def _custom_values(self):
         custom = {
             "stopAt": self.custom_stop_at.get(),
             "maxResolution": self.custom_max_resolution.get(),
@@ -1293,7 +1434,31 @@ class App:
         }
         if not custom["saveAt"] and custom["stopAt"]:
             custom["saveAt"] = custom["stopAt"]
-        return write_custom_settings(setting, custom)
+        return custom
+
+    def save_custom_preset(self):
+        setting = self._selected_setting()
+        if not setting:
+            self.log_line("No quality profile selected.")
+            return
+        USER_SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        output = filedialog.asksaveasfilename(
+            title=tr(self.lang, "save_custom_preset"),
+            initialdir=str(USER_SETTINGS_DIR),
+            initialfile=f"user-preset-{timestamp}.ini",
+            defaultextension=".ini",
+            filetypes=[("INI settings", "*.ini"), ("All files", "*.*")],
+        )
+        if not output:
+            return
+        try:
+            saved_path = write_user_settings_preset(setting, self._custom_values(), output)
+        except OSError as exc:
+            self.log_line(f"Failed to save preset: {exc}")
+            return
+        self._reload_settings(preferred_path=saved_path)
+        self.log_line(tr(self.lang, "saved_preset").format(path=saved_path))
 
     def toggle_advanced(self):
         self.advanced_visible = not self.advanced_visible
@@ -1310,6 +1475,33 @@ class App:
                 return item
         return self.settings[0] if self.settings else None
 
+    def _reload_settings(self, preferred_path=None):
+        previous = preferred_path
+        if previous is None:
+            current = self._selected_setting()
+            previous = current.get("path") if current else None
+        try:
+            previous_resolved = Path(previous).resolve() if previous else None
+        except OSError:
+            previous_resolved = None
+        self.settings = load_settings()
+        values = [item["label"] for item in self.settings]
+        if hasattr(self, "profile_combo"):
+            self.profile_combo["values"] = values
+        selected = None
+        if previous_resolved:
+            for item in self.settings:
+                try:
+                    if item["path"].resolve() == previous_resolved:
+                        selected = item["label"]
+                        break
+                except OSError:
+                    pass
+        if selected is None and values:
+            selected = values[min(2, len(values) - 1)]
+        self.selected_profile.set(selected or "")
+        self._update_setting_description()
+
     def _render_lists(self):
         self.image_list.delete(0, END)
         for path in self.images:
@@ -1317,6 +1509,43 @@ class App:
         self.json_list.delete(0, END)
         for path in self.json_files:
             self.json_list.insert(END, str(path))
+
+    def _add_json_paths(self, paths):
+        added = 0
+        for output in best_geometry_jsons(paths):
+            output = Path(output)
+            if output not in self.outputs:
+                self.outputs.append(output)
+            if output not in self.json_files:
+                self.json_files.append(output)
+                added += 1
+        return added
+
+    def _load_existing_checkpoints_for_image(self, image_path, log_to_queue=False):
+        existing = best_geometry_jsons(generated_jsons(image_path))
+        if not existing:
+            return 0
+        added = self._add_json_paths(existing[:1])
+        if added:
+            message = tr(self.lang, "existing_checkpoints_found").format(image=Path(image_path).name, count=len(existing))
+            if log_to_queue:
+                self.queue.put(("log", message))
+            else:
+                self.log_line(message)
+        return added
+
+    def _queue_generated_outputs(self, image_path, before):
+        after = generated_jsons(image_path)
+        new_outputs = best_geometry_jsons([path for path in after if path.resolve() not in before])
+        if not new_outputs and after:
+            new_outputs = best_geometry_jsons(after[:1])
+        for output in new_outputs:
+            if output not in self.outputs:
+                self.outputs.append(output)
+            if output not in self.json_files:
+                self.json_files.append(output)
+            self.queue.put(("log", f"Generated: {output}"))
+        return new_outputs
 
     def log_line(self, message):
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -1588,6 +1817,8 @@ class App:
         self.eta_last_time = None
         self.eta_smoothed_seconds_per_layer = None
         self.eta_display_remaining = None
+        self.eta_max_layer_seen = None
+        self.eta_recycle_notice_active = False
 
     def _format_remaining_time(self, seconds):
         seconds = max(0, int(round(seconds)))
@@ -1607,6 +1838,13 @@ class App:
         current = int(match.group(1))
         total = int(match.group(2))
         now = time.time()
+        if self.eta_max_layer_seen is not None and current <= self.eta_max_layer_seen:
+            if current < self.eta_max_layer_seen and not self.eta_recycle_notice_active:
+                self.eta_recycle_notice_active = True
+                return tr(self.lang, "generator_recycled_layers").format(max_layer=self.eta_max_layer_seen, total=total)
+            return None
+        self.eta_max_layer_seen = current
+        self.eta_recycle_notice_active = False
         if self.eta_last_layer is None:
             self.eta_last_layer = current
             self.eta_last_time = now
@@ -1680,6 +1918,8 @@ class App:
             return last_message
         if friendly.startswith("Generated layer "):
             message = self._progress_with_eta(friendly)
+            if not message:
+                return last_message
             self.queue.put(("progress", message))
             self.queue.put(("log", message))
             return friendly
@@ -1728,13 +1968,69 @@ class App:
             title="Choose images",
             filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp"), ("All files", "*.*")],
         )
+        added_paths = []
         for item in files:
             path = Path(item)
             if path.exists() and path not in self.images:
                 self.images.append(path)
+                added_paths.append(path)
+                self._load_existing_checkpoints_for_image(path)
         self._render_lists()
         if files:
-            self.show_preview(render_source_image(Path(files[0])))
+            self.show_source_preview(Path(files[0]))
+        if added_paths:
+            existing_added = sum(1 for path in added_paths if generated_jsons(path))
+            if existing_added:
+                self.log_line(tr(self.lang, "cannot_resume_checkpoint"))
+
+    def remove_selected_image(self):
+        selection = list(self.image_list.curselection())
+        if not selection:
+            self.log_line(tr(self.lang, "no_image_selected"))
+            return
+        for index in sorted(selection, reverse=True):
+            try:
+                del self.images[index]
+            except IndexError:
+                pass
+        self._render_lists()
+        self.preview_label.config(image="", text=tr(self.lang, "preview_hint"))
+        self.preview_label.image = None
+
+    def _unique_preset_destination(self, source_path):
+        USER_SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+        stem = source_path.stem
+        suffix = source_path.suffix or ".ini"
+        candidate = USER_SETTINGS_DIR / f"{stem}{suffix}"
+        index = 2
+        while candidate.exists():
+            candidate = USER_SETTINGS_DIR / f"{stem} ({index}){suffix}"
+            index += 1
+        return candidate
+
+    def import_preset(self):
+        files = filedialog.askopenfilenames(
+            title="Import generator preset",
+            filetypes=[("INI settings", "*.ini"), ("All files", "*.*")],
+        )
+        imported = []
+        for item in files:
+            source = Path(item)
+            if not source.exists():
+                continue
+            destination = self._unique_preset_destination(source)
+            try:
+                shutil.copy2(source, destination)
+                imported.append(destination)
+            except OSError as exc:
+                self.log_line(f"Failed to import preset {source}: {exc}")
+        if imported:
+            self._reload_settings(preferred_path=imported[-1])
+            self.log_line(tr(self.lang, "imported_presets").format(count=len(imported)))
+
+    def open_preset_folder(self):
+        USER_SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+        os.startfile(USER_SETTINGS_DIR)
 
     def add_json(self):
         files = filedialog.askopenfilenames(
@@ -1749,6 +2045,21 @@ class App:
         if files:
             self.show_preview(render_geometry_json(Path(files[0])))
 
+    def remove_selected_json(self):
+        selection = list(self.json_list.curselection())
+        if not selection:
+            self.log_line(tr(self.lang, "no_json_selected"))
+            return
+        for index in sorted(selection, reverse=True):
+            try:
+                del self.json_files[index]
+            except IndexError:
+                pass
+        self._render_lists()
+        if hasattr(self, "import_preview_label"):
+            self.import_preview_label.config(image="", text=tr(self.lang, "preview_hint"))
+            self.import_preview_label.image = None
+
     def use_generated_outputs(self):
         for path in self.outputs:
             if path.exists() and path not in self.json_files:
@@ -1759,7 +2070,7 @@ class App:
     def _preview_selected_image(self, _event=None):
         selection = self.image_list.curselection()
         if selection:
-            self.show_preview(render_source_image(self.images[selection[0]]))
+            self.show_source_preview(self.images[selection[0]])
 
     def _preview_selected_json(self, _event=None):
         selection = self.json_list.curselection()
@@ -1783,6 +2094,16 @@ class App:
             import_image = PhotoImage(data=data)
             self.import_preview_label.config(image=import_image, text="", bg="#202020")
             self.import_preview_label.image = import_image
+
+    def show_source_preview(self, path):
+        data = render_source_image(path)
+        if data:
+            self.show_preview(data)
+            return
+        if Path(path).suffix.lower() in (".png", ".gif"):
+            self.show_preview_file(path)
+            return
+        self.show_preview(None)
 
     def show_preview_file(self, path):
         try:
@@ -1906,7 +2227,11 @@ class App:
                     except OSError:
                         pass
                 self.queue.put(("log", f"Generating: {image_path}"))
-                self.queue.put(("preview", render_source_image(image_path)))
+                source_preview = render_source_image(image_path)
+                if source_preview:
+                    self.queue.put(("preview", source_preview))
+                elif image_path.suffix.lower() in (".png", ".gif"):
+                    self.queue.put(("preview_file", image_path))
                 flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
                 cmd = build_generator_command(image_path, setting)
                 self._record_detail(f"GENERATOR COMMAND: {self._format_command(cmd)}")
@@ -1963,6 +2288,11 @@ class App:
                     while proc.poll() is None:
                         if self.shutdown_event.is_set():
                             self._terminate_process(proc)
+                            outputs = self._queue_generated_outputs(image_path, before)
+                            for output in outputs:
+                                self.queue.put(("log", tr(self.lang, "checkpoint_available_after_failure").format(path=output)))
+                            if outputs:
+                                self.queue.put(("render_lists", None))
                             self.queue.put(("status", tr(self.lang, "stopped")))
                             return
                         _drain_generator_output()
@@ -1988,24 +2318,21 @@ class App:
                             self.current_generator_proc = None
                 if proc.returncode != 0:
                     self._record_detail(f"GENERATOR EXIT: {proc.returncode}")
+                    outputs = self._queue_generated_outputs(image_path, before)
+                    for output in outputs:
+                        self.queue.put(("log", tr(self.lang, "checkpoint_available_after_failure").format(path=output)))
+                    if outputs:
+                        self.queue.put(("render_lists", None))
                     self.queue.put(("log", self._generator_exit_message(proc.returncode)))
                     self.queue.put(("status", tr(self.lang, "failed")))
                     return
                 self._record_detail("GENERATOR EXIT: 0")
-                after = generated_jsons(image_path)
-                new_outputs = best_geometry_jsons([path for path in after if path.resolve() not in before])
-                if not new_outputs and after:
-                    new_outputs = best_geometry_jsons(after[:1])
+                new_outputs = self._queue_generated_outputs(image_path, before)
                 if not new_outputs:
                     self.queue.put(("log", "Generator finished but no JSON output was found."))
                     self.queue.put(("status", tr(self.lang, "failed")))
                     return
                 for output in new_outputs:
-                    if output not in self.outputs:
-                        self.outputs.append(output)
-                    if output not in self.json_files:
-                        self.json_files.append(output)
-                    self.queue.put(("log", f"Generated: {output}"))
                     preview_files = generated_preview_files(image_path)
                     if preview_files:
                         self.queue.put(("preview_file", preview_files[0]))

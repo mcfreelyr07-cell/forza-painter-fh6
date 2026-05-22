@@ -1,11 +1,13 @@
-from pathlib import Path
 import re
+from pathlib import Path
 
 from app_paths import RESOURCE_ROOT, ROOT
 from geometry_json import drawable_shape_count
 
 
-SETTINGS_DIR = RESOURCE_ROOT / "config" / "settings"
+BUNDLED_SETTINGS_DIR = RESOURCE_ROOT / "config" / "settings"
+USER_SETTINGS_DIR = ROOT / "config" / "settings"
+SETTINGS_DIR = BUNDLED_SETTINGS_DIR
 GENERATOR_EXE = RESOURCE_ROOT / "bin" / "forza-painter-geometrize-go.exe"
 PREVIEW_DIR = ROOT / "runtime" / "previews"
 CUSTOM_SETTINGS_DIR = ROOT / "runtime" / "custom-settings"
@@ -50,14 +52,43 @@ def parse_settings(path):
     return values
 
 
+def merged_settings_values(base_setting, custom_values):
+    values = dict(parse_settings(base_setting["path"]))
+    for key, value in custom_values.items():
+        value = str(value).strip()
+        if value:
+            values[key] = value
+    return values
+
+
+def _settings_paths():
+    seen = set()
+    for source, folder in (("bundled", BUNDLED_SETTINGS_DIR), ("user", USER_SETTINGS_DIR)):
+        if not folder.exists():
+            continue
+        for path in sorted(folder.glob("*.ini")):
+            if path.name.startswith("_"):
+                continue
+            try:
+                key = str(path.resolve()).lower()
+            except OSError:
+                key = str(path).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            yield source, path
+
+
 def load_settings():
     profiles = []
-    paths = [path for path in sorted(SETTINGS_DIR.glob("*.ini")) if not path.name.startswith("_")]
-    for index, path in enumerate(paths, start=1):
+    for index, (source, path) in enumerate(_settings_paths(), start=1):
         name = re.sub(r"^[a-z0-9]+[.)]\s*", "", path.stem, flags=re.IGNORECASE)
         name = name.replace(" - ", " / ")
+        if source == "user":
+            name = f"User / {name}"
         profiles.append({
             "index": index,
+            "source": source,
             "path": path,
             "label": f"{index}. {name}",
             "description": setting_description(path),
@@ -67,11 +98,7 @@ def load_settings():
 
 
 def write_custom_settings(base_setting, custom_values):
-    values = dict(parse_settings(base_setting["path"]))
-    for key, value in custom_values.items():
-        value = str(value).strip()
-        if value:
-            values[key] = value
+    values = merged_settings_values(base_setting, custom_values)
     CUSTOM_SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
     path = CUSTOM_SETTINGS_DIR / "custom.ini"
     lines = ["description = Custom UI settings"]
@@ -87,13 +114,43 @@ def write_custom_settings(base_setting, custom_values):
     return setting
 
 
+def write_user_settings_preset(base_setting, custom_values, output_path, description="User custom settings"):
+    values = merged_settings_values(base_setting, custom_values)
+    USER_SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+    path = Path(output_path)
+    if path.suffix.lower() != ".ini":
+        path = path.with_suffix(".ini")
+    lines = [f"description = {description}"]
+    for key in SETTING_KEYS:
+        if key in values:
+            lines.append(f"{key} = {values[key]}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
 def generated_jsons(image_path):
     image_path = Path(image_path)
     candidates = []
-    folder = image_path.parent / image_path.stem
-    if folder.exists():
-        candidates.extend(folder.rglob("*.json"))
-    candidates.extend(image_path.parent.glob(f"{image_path.stem}*.json"))
+    output_base = generator_output_base(image_path)
+    folders = {
+        image_path.parent / image_path.stem,
+        output_base.parent / output_base.name,
+    }
+    for folder in folders:
+        if folder.exists():
+            candidates.extend(folder.rglob("*.json"))
+    prefixes = {
+        image_path.stem,
+        image_path.name,
+        output_base.name,
+        image_path.stem.split(".", 1)[0],
+        output_base.name.split(".", 1)[0],
+    }
+    patterns = {f"{prefix}*.json" for prefix in prefixes if prefix}
+    for pattern in patterns:
+        candidates.extend(image_path.parent.glob(pattern))
+        if output_base.parent != image_path.parent:
+            candidates.extend(output_base.parent.glob(pattern))
     return sorted(set(candidates), key=lambda path: path.stat().st_mtime, reverse=True)
 
 
@@ -133,7 +190,8 @@ def generated_preview_files(image_path):
 
 def generator_output_base(image_path):
     image_path = Path(image_path)
-    return image_path.with_suffix("")
+    safe_stem = image_path.stem.replace(".", "_")
+    return image_path.with_name(safe_stem)
 
 
 def build_generator_command(image_path, setting):

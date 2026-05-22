@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.5.3 / 2026-05-22
+
+- Added user preset import for the one-file EXE; imported `.ini` presets are stored in the external `config/settings/` folder beside the app.
+- Added remove buttons for the selected image and selected JSON entries.
+- Improved checkpoint handling: existing checkpoint JSON files are detected and reusable checkpoints are added to the Import list after failed or stopped generation.
+- Fixed JSON output discovery when source image filenames contain extra dots, such as `image.1png.png`.
+- Improved generation progress logs when the GPU generator recycles fully covered layers, so the UI no longer looks like generation restarted from an earlier layer.
+- Added a Pillow-based preview fallback and packaged it into the EXE so fresh one-file installs can preview images and JSON without OpenCV.
+
 ## v1.5.2 / 2026-05-22
 
 - Added a PyInstaller-based one-file EXE so normal users no longer need to install Python, create `.venv`, or keep helper files beside the app.

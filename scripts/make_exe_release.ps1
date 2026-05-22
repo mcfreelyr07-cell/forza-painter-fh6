@@ -25,6 +25,8 @@ if ($LASTEXITCODE -ne 0) {
     & $Python -m pip install pyinstaller
 }
 
+& $Python -m pip install -r (Join-Path $Root "requirements.txt")
+
 if (Test-Path $BuildRoot) {
     Remove-Item -LiteralPath $BuildRoot -Recurse -Force
 }
@@ -38,7 +40,12 @@ $common = @(
     "--workpath", $BuildRoot,
     "--specpath", $BuildRoot,
     "--distpath", $BuildRoot,
-    "--hidden-import", "win32timezone"
+    "--hidden-import", "win32timezone",
+    "--hidden-import", "cv2",
+    "--hidden-import", "numpy",
+    "--hidden-import", "PIL",
+    "--hidden-import", "PIL.Image",
+    "--hidden-import", "PIL.ImageDraw"
 )
 
 $appArgs = $common + @(
