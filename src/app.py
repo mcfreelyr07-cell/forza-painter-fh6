@@ -43,6 +43,7 @@ from app_config import (
     UPDATE_VERSION_URL,
     UPDATE_CHANGELOG_URL,
     UPDATE_RELEASE_URL,
+    MARKET_URL,
     UPDATE_CHECK_TIMEOUT_SECONDS,
     Theme,
 )
@@ -645,6 +646,43 @@ class App:
         self.translated.append((widget, key, "text"))
         return widget
 
+    def _build_market_banner(self, parent):
+        banner = Frame(parent, bg=Theme.ACCENT_DARK, highlightthickness=1, highlightbackground=Theme.ACCENT)
+        banner._keep_custom_theme = True
+        banner.pack(fill=X, padx=0, pady=(10, 0))
+        message = Label(
+            banner,
+            text=tr(self.lang, "market_banner"),
+            bg=Theme.ACCENT_DARK,
+            fg="#ffffff",
+            anchor="w",
+            justify=LEFT,
+            font=("Segoe UI", 11, "bold"),
+        )
+        message.pack(side=LEFT, fill=X, expand=True, padx=12, pady=8)
+        self.translated.append((message, "market_banner", "text"))
+        button = Button(
+            banner,
+            text=tr(self.lang, "open_market"),
+            command=self.open_preset_market,
+            bg=Theme.WARN,
+            fg="#0d1117",
+            activebackground="#ffe08a",
+            activeforeground="#0d1117",
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=4,
+            font=("Segoe UI", 10, "bold"),
+            cursor="hand2",
+        )
+        button.pack(side=RIGHT, padx=10, pady=8)
+        self.translated.append((button, "open_market", "text"))
+        return banner
+
+    def open_preset_market(self):
+        webbrowser.open(MARKET_URL)
+
     def _mapped_label_color(self, color):
         value = str(color or "").lower()
         if value in ("black", "#000000", "#000", "systembuttontext", "systemwindowtext"):
@@ -660,6 +698,8 @@ class App:
         return color if color else Theme.TEXT
 
     def _apply_dark_theme_recursive(self, widget):
+        if getattr(widget, "_keep_custom_theme", False):
+            return
         try:
             if isinstance(widget, Frame):
                 bg = Theme.BG if widget.master is self.root else Theme.PANEL
@@ -794,6 +834,7 @@ class App:
         self.tabs.bind("<<NotebookTabChanged>>", self._schedule_preview_refresh)
 
     def _build_generate_tab(self):
+        self._build_market_banner(self.generate_tab)
         left_outer = Frame(self.generate_tab)
         left_outer.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 10), pady=10)
         right = Frame(self.generate_tab)
@@ -923,6 +964,7 @@ class App:
         self.preview_label.bind("<Configure>", self._schedule_preview_refresh)
 
     def _build_import_tab(self):
+        self._build_market_banner(self.import_tab)
         left = Frame(self.import_tab)
         left.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 10), pady=10)
         right = Frame(self.import_tab)
@@ -993,6 +1035,7 @@ class App:
         self.import_preview_label.bind("<Configure>", self._schedule_preview_refresh)
 
     def _build_tools_tab(self):
+        self._build_market_banner(self.tools_tab)
         form = Frame(self.tools_tab)
         form.pack(fill=X, padx=10, pady=10)
         self._field(form, "layer_count", self.layer_count, row=0)
@@ -1011,6 +1054,7 @@ class App:
         self._button(actions, "open_runtime_folder", self.open_runtime_folder).pack(side=LEFT, padx=6)
 
     def _build_tutorial_tab(self):
+        self._build_market_banner(self.tutorial_tab)
         self.tutorial_text = Text(self.tutorial_tab, wrap="word")
         self.tutorial_text.pack(fill=BOTH, expand=True, padx=10, pady=10)
         self._update_tutorial()

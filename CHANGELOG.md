@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.7.0 / 2026-06-01
+
+- Updated the app version to `v1.7.0`; release packages now use `forza-painter-fh6-v1.7.0.exe`.
+- Added a prominent Preset Market banner to the Generate, Import, Tools, and Tutorial pages.
+- The new market button opens https://painter6.com so users can browse shared images, presets, and JSON packages directly from the app.
+
 ## v1.6.8 / 2026-05-28
 
 - Updated the app version to `v1.6.8`; release packages now use `forza-painter-fh6-v1.6.8.exe`.

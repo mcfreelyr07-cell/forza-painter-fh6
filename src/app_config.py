@@ -33,6 +33,7 @@ UPDATE_CHANGELOG_URL = (
     "https://raw.githubusercontent.com/bvzrays/forza-painter-fh6/main/CHANGELOG.md"
 )
 UPDATE_RELEASE_URL = "https://github.com/bvzrays/forza-painter-fh6/releases/latest"
+MARKET_URL = "https://painter6.com"
 
 
 # ---------------------------------------------------------------------------

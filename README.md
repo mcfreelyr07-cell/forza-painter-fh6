@@ -15,12 +15,14 @@
 </p>
 
 <p align="center">
-  <code>v1.6.8</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>One-file EXE</code>
+  <code>v1.7.0</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>One-file EXE</code>
 </p>
 
 Convert PNG/JPG/BMP images into Forza Horizon 6 Vinyl Group layers. The app handles generation, preview, and import in one desktop window; normal users do not need Python, `.venv`, batch files, or manual memory addresses.
 
-> **Download the EXE:** get `forza-painter-fh6-v1.6.8.exe` from [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) and run it directly.
+> **Download the EXE:** get `forza-painter-fh6-v1.7.0.exe` from [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) and run it directly.
+
+> **Preset Market:** browse shared images, presets, and JSON packages at https://painter6.com or use the new in-app market banner.
 
 > **If the result looks blurry:** raise `Random samples` first. Values above **200000** usually make a major quality difference; higher values are clearer but take much longer to generate.
 
@@ -32,11 +34,12 @@ Convert PNG/JPG/BMP images into Forza Horizon 6 Vinyl Group layers. The app hand
 | Preview output | Show source and generated geometry previews inside the app. |
 | Import to FH6 | Import JSON into the currently open FH6 Vinyl Group Editor. |
 | Safe FH6 workflow | Auto-locate and verify the editable layer table before writing. |
+| Preset Market | Open https://painter6.com from the app to browse shared images, presets, and JSON packages. |
 | Update check | Check for new versions on startup and show changelog notes when available. |
 
 ## Quick Start
 
-1. Download `forza-painter-fh6-v1.6.8.exe` from [Releases](https://github.com/bvzrays/forza-painter-fh6/releases).
+1. Download `forza-painter-fh6-v1.7.0.exe` from [Releases](https://github.com/bvzrays/forza-painter-fh6/releases).
 2. Put the EXE in a normal writable folder, for example `Desktop\forza-painter-fh6`.
 3. Double-click the EXE. For FH6 import, run it as administrator if Windows blocks process access.
 4. In FH6, open `Create Vinyl Group` / `Vinyl Group Editor`, load a sphere template, then `Ungroup` it.
@@ -134,12 +137,19 @@ These folders can be deleted when the app is closed if you want to reset local r
 ## Resources
 
 - Import walkthrough video: https://www.bilibili.com/video/BV1hG5Z6nENZ
+- Preset Market: https://painter6.com
 - Bundled GPU generator source/reference: https://github.com/zjl88858/forza-painter-geometrize-gpu
 - Full changelog: [CHANGELOG.md](CHANGELOG.md)
 
 ## Changelog
 
 Only versioned release entries are kept here. See [CHANGELOG.md](CHANGELOG.md) for the app update prompt changelog.
+
+### v1.7.0 / 2026-06-01
+
+- Updated the app version to `v1.7.0`; release packages now use `forza-painter-fh6-v1.7.0.exe`.
+- Added a prominent Preset Market banner to the Generate, Import, Tools, and Tutorial pages.
+- The new market button opens https://painter6.com so users can browse shared images, presets, and JSON packages directly from the app.
 
 ### v1.6.8 / 2026-05-28
 
