@@ -15,12 +15,12 @@
 </p>
 
 <p align="center">
-  <code>v1.7.0</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>单文件 EXE</code>
+  <code>v1.8.0</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>单文件 EXE</code>
 </p>
 
 把 PNG/JPG/BMP 图片转换成 Forza Horizon 6 的 Vinyl Group 图层。软件内完成生成、预览和导入，普通用户不需要 Python、`.venv`、批处理文件，也不需要手动填写内存地址。
 
-> **下载 EXE：** 从 [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) 下载 `forza-painter-fh6-v1.7.0.exe`，直接运行。
+> **下载 EXE：** 从 [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) 下载 `forza-painter-fh6-v1.8.0.exe`，直接运行。
 
 > **预设市场：** 可以在 https://painter6.com 浏览玩家分享的图片、预设和 JSON 包，也可以通过软件内的新市场横幅直接打开。
 
@@ -39,7 +39,7 @@
 
 ## 快速开始
 
-1. 从 [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) 下载 `forza-painter-fh6-v1.7.0.exe`。
+1. 从 [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) 下载 `forza-painter-fh6-v1.8.0.exe`。
 2. 把 EXE 放在普通可写目录里，例如 `Desktop\forza-painter-fh6`。
 3. 双击 EXE 启动。导入 FH6 时如果被 Windows 拦截进程访问，请用管理员身份运行 EXE。
 4. 在游戏里进入 `Create Vinyl Group` / `Vinyl Group Editor`，加载球形模板并 `Ungroup`。
@@ -117,7 +117,7 @@ FH 需要额外 4 个边界层来正确保存封面和贴车范围。例如：10
 
 ## 运行文件位置
 
-单文件 EXE 会临时解压内部文件，并把正常运行数据放在 EXE 外部。软件启动日志和 `Tools` 页面会显示具体路径。
+单文件 EXE 会临时解压内部文件，并把正常运行数据放在 EXE 外部。软件启动日志会显示具体路径。
 
 EXE 旁边可能出现这些外部文件夹：
 
@@ -144,6 +144,13 @@ EXE 旁边可能出现这些外部文件夹：
 ## 更新日志
 
 这里仅保留带版本号的发布记录。用于软件更新弹窗的完整记录见 [CHANGELOG.md](CHANGELOG.md)。
+
+### v1.8.0 / 2026-06-01
+
+- 更新软件版本到 `v1.8.0`；发布文件现在使用 `forza-painter-fh6-v1.8.0.exe`。
+- 新增实验性的全图形导入/导出流程：全图形导入并入 `导入` 页，当前游戏组导出放在 `导出` 页。
+- 全图形导入/导出使用图层偏移 `0x7A` 的 16-bit 形状 word，并避免复制 `0xA8` 之类的易失资源指针。
+- 加入 Kloudy's FH6 Painter custom-importer 归属说明和字体形状 registry，用于 type-code JSON 支持。
 
 ### v1.7.0 / 2026-06-01
 

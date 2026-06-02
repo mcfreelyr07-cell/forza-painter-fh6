@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.8.0 / 2026-06-01
+
+- Updated the app version to `v1.8.0`; release packages now use `forza-painter-fh6-v1.8.0.exe`.
+- Added experimental FH6 full-shape import/export flow: full-shape import lives on the Import page, and game-group export lives on the Export page.
+- Import now auto-detects full-shape/type-code JSONs from the normal JSON list and routes them through the full-shape importer.
+- Full-shape detection now recognizes exported type-code JSON, Kloudy/Fabric handmade JSON, FH6 full type codes, hex/string shape words, font-shape fields, and common primitive names such as `Circle`, `Square`, `Triangle`, and `Ellipse`.
+- Added resource-based preview rendering for FH6 type-code JSON exports and Kloudy/Fabric handmade JSONs, using the bundled FH6 vinyl vertex resources instead of rectangle fallbacks.
+- Type-code preview now treats mask layers as transparent cutouts instead of drawing mask shapes as ordinary filled blocks.
+- Full-shape failures now show a direct user-facing reminder with the key FH6/editor/template checks.
+- Full-shape import success now shows a save/reopen reminder because FH6 can keep showing stale live template resources until the saved vinyl group is reloaded.
+- Full-shape probe/import/export reports are kept out of the normal log flow and can be exported manually as a ZIP when debugging is needed.
+- Full-shape export reads the current editable FH6 group into JSON using the 16-bit shape word at layer offset `0x7A`.
+- Full-shape import writes only stable visual fields (`position`, `scale`, `rotation`, `skew`, `color`, `mask`, and `shape word`) and does not copy volatile resource pointers such as `0xA8`.
+- Full-shape import can clear unused template slots and trim the FH6 group count/table end after writing.
+- Included the Kloudy's FH6 Painter custom-importer MIT attribution, font-shape registry, and FH6 vinyl resource data used by the type-code importer/previewer.
+- Moved image/JSON preview rerendering off the Tk UI thread, debounced resize-triggered preview refreshes, and throttled width-driven Tk layout updates to reduce horizontal window-resize stutter.
+
 ## v1.7.0 / 2026-06-01
 
 - Updated the app version to `v1.7.0`; release packages now use `forza-painter-fh6-v1.7.0.exe`.

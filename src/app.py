@@ -16,6 +16,7 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
+import zipfile
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,7 @@ from tkinter import BOTH, END, LEFT, RIGHT, X, Button, Canvas, Checkbutton, Entr
 import psutil
 
 from app_paths import ROOT
+from fh6_vinyl_resources import load_vinyl_polygons
 from game_profiles import PROFILES
 from geometry_json import RECTANGLE, ROTATED_ELLIPSE, load_normalized_geometry
 from generator_backend import GENERATOR_EXE, GENERATOR_JSON_SCAN_SECONDS, GENERATOR_POLL_SLEEP_SECONDS, GENERATOR_PREVIEW_SCAN_SECONDS, USER_SETTINGS_DIR, best_geometry_jsons, build_generator_command, build_generator_env, generated_jsons, generated_preview_files, generator_preview_path, load_settings, preprocess_input_image, write_custom_settings, write_user_settings_preset
@@ -34,6 +36,7 @@ from app_config import (
     APP_DIR,
     PROBE_DIR,
     SESSION_PATH,
+    FULL_SHAPE_ROOT,
     MEMORY_SNAPSHOT_LIMIT_MB,
     PREVIEW_MAX,
     DETAILED_LOG_OUTPUT_LIMIT,
@@ -66,6 +69,48 @@ ETA_MAX_HISTORY_SECONDS = 180.0
 ETA_MIN_WINDOW_SECONDS = 4.0
 ETA_MIN_WINDOW_LAYERS = 25
 PREVIEW_JSON_SUPERSAMPLE = 2
+PREVIEW_RESIZE_DEBOUNCE_MS = 500
+PREVIEW_RENDER_START_MS = 1
+PREVIEW_SIZE_BUCKET = 32
+PREVIEW_CACHE_LIMIT = 24
+LAYOUT_RESIZE_DEBOUNCE_MS = 180
+LAYOUT_SIZE_BUCKET = 64
+FH6_CIRCLE_BASE_SIZE = 63.0
+FH6_RECTANGLE_BASE_SIZE = 127.0
+FH6_TYPE_CODE_BASE = 0x100000
+FH6_PRIMITIVE_NAME_WORDS = {
+    "square": 0x0065,
+    "rectangle": 0x0065,
+    "rect": 0x0065,
+    "circle": 0x0066,
+    "sphere": 0x0066,
+    "triangle": 0x0067,
+    "circle border": 0x0070,
+    "circle outline": 0x0070,
+    "ellipse": 0x0088,
+    "oval": 0x0088,
+}
+FH6_TYPECODE_MARKER_KEYS = (
+    "type_word",
+    "typeWord",
+    "shape_word",
+    "shapeWord",
+    "font_shape",
+    "fontShape",
+    "shape_name",
+    "shapeName",
+    "font",
+    "font_index",
+    "fontIndex",
+    "forza_font",
+    "forzaFont",
+    "glyph",
+    "char",
+    "character",
+    "text",
+    "font_block",
+    "fontBlock",
+)
 
 
 # Removed: TEXT dictionary (now in i18n.py)
@@ -73,6 +118,7 @@ PREVIEW_JSON_SUPERSAMPLE = 2
 
 def ensure_dirs():
     PROBE_DIR.mkdir(parents=True, exist_ok=True)
+    FULL_SHAPE_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 
@@ -140,6 +186,42 @@ def run_embedded_helper(helper_name, args):
         import main as importer_main
 
         return importer_main.main(["main.py", *args])
+    if helper_name == "fh6_typecode_probe":
+        import fh6_typecode_probe
+
+        previous_argv = sys.argv
+        try:
+            sys.argv = ["fh6_typecode_probe.py", *args]
+            return fh6_typecode_probe.main()
+        finally:
+            sys.argv = previous_argv
+    if helper_name == "fh6_typecode_export":
+        import fh6_typecode_export
+
+        previous_argv = sys.argv
+        try:
+            sys.argv = ["fh6_typecode_export.py", *args]
+            return fh6_typecode_export.main()
+        finally:
+            sys.argv = previous_argv
+    if helper_name == "fh6_typecode_import":
+        import fh6_typecode_import
+
+        previous_argv = sys.argv
+        try:
+            sys.argv = ["fh6_typecode_import.py", *args]
+            return fh6_typecode_import.main()
+        finally:
+            sys.argv = previous_argv
+    if helper_name == "fh6_typecode_trim":
+        import fh6_typecode_trim
+
+        previous_argv = sys.argv
+        try:
+            sys.argv = ["fh6_typecode_trim.py", *args]
+            return fh6_typecode_trim.main()
+        finally:
+            sys.argv = previous_argv
     raise SystemExit(f"Unknown helper: {helper_name}")
 
 
@@ -165,6 +247,78 @@ def game_processes():
 def parse_hex_or_empty(value):
     value = str(value or "").strip()
     return value or None
+
+
+def typecode_shape_count(path):
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    shapes = payload.get("shapes")
+    if not isinstance(shapes, list):
+        raise ValueError("full-shape JSON must contain a shapes list")
+    return len(shapes)
+
+
+def parse_preview_int(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return int(text, 0)
+        except ValueError:
+            return None
+    return None
+
+
+def normalize_typecode_name(value):
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"[^a-z0-9]+", " ", value.strip().lower()).strip()
+
+
+def shape_has_typecode_marker(shape):
+    if not isinstance(shape, dict):
+        return False
+    if any(key in shape for key in FH6_TYPECODE_MARKER_KEYS):
+        return True
+    for key in ("type", "name"):
+        value = shape.get(key)
+        numeric = parse_preview_int(value)
+        if numeric is not None and numeric >= FH6_TYPE_CODE_BASE:
+            return True
+        if normalize_typecode_name(value) in FH6_PRIMITIVE_NAME_WORDS:
+            return True
+    return False
+
+
+def is_typecode_payload(payload):
+    if not isinstance(payload, dict):
+        return False
+    fmt = str(payload.get("format") or "")
+    if fmt.startswith("fh6_typecode_json"):
+        return True
+    source = payload.get("source") or {}
+    if isinstance(source, dict) and "uint16_at_layer_0x7A" in str(source.get("type_model") or ""):
+        return True
+    shapes = payload.get("shapes")
+    if not isinstance(shapes, list):
+        return False
+    for shape in shapes:
+        if shape_has_typecode_marker(shape):
+            return True
+    return False
+
+
+def is_typecode_json(path):
+    try:
+        return is_typecode_payload(json.loads(Path(path).read_text(encoding="utf-8")))
+    except Exception:
+        return False
 
 
 def load_session_location():
@@ -293,7 +447,217 @@ def render_source_image(path, max_size=None):
         return None
 
 
+def _typecode_preview_shapes(path):
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not is_typecode_payload(payload):
+        return None
+    shapes = payload.get("shapes")
+    if not isinstance(shapes, list) or not shapes:
+        return None
+    out = []
+    for shape in shapes:
+        if not isinstance(shape, dict):
+            continue
+        data = list(shape.get("data") or [])
+        color = list(shape.get("color") or [])
+        if len(data) < 4 or len(color) < 4:
+            continue
+        try:
+            x, y, w, h = [float(v) for v in data[:4]]
+            rotation = float(data[4]) if len(data) >= 5 else 0.0
+            rgba = [max(0, min(255, int(round(float(v))))) for v in color[:4]]
+        except (TypeError, ValueError):
+            continue
+        type_code = typecode_preview_type_code(shape)
+        word = type_code & 0xFFFF if type_code is not None else typecode_preview_word(shape)
+        if word is None:
+            continue
+        if rgba[3] <= 0:
+            continue
+        skew = float(data[5]) if len(data) >= 6 else 0.0
+        resource = load_vinyl_polygons(type_code) if type_code is not None else None
+        if resource:
+            polygons = [
+                [_transform_typecode_point(px, py, x, y, w, h, rotation, skew) for px, py in polygon]
+                for polygon in resource["polygons"]
+            ]
+        else:
+            polygons = _fallback_typecode_polygons(x, y, w, h, rotation, skew, word & 0xFFFF)
+        try:
+            data_mask = bool(int(float(data[6]))) if len(data) >= 7 else False
+        except (TypeError, ValueError):
+            data_mask = bool(data[6]) if len(data) >= 7 else False
+        is_mask = bool(shape.get("mask") or shape.get("is_mask") or shape.get("isMask") or data_mask)
+        if polygons:
+            out.append({"polygons": polygons, "color": rgba, "word": word & 0xFFFF, "type_code": type_code, "mask": is_mask})
+    return out
+
+
+def typecode_preview_type_code(shape):
+    type_code = parse_preview_int(shape.get("type"))
+    if type_code is not None and type_code >= FH6_TYPE_CODE_BASE:
+        return type_code
+    word = None
+    for key in ("type_word", "typeWord", "shape_word", "shapeWord"):
+        value = parse_preview_int(shape.get(key))
+        if value is not None:
+            word = value & 0xFFFF
+            break
+    if word is not None:
+        return FH6_TYPE_CODE_BASE + word
+    for key in ("shape_name", "shapeName", "name", "type"):
+        primitive_word = FH6_PRIMITIVE_NAME_WORDS.get(normalize_typecode_name(shape.get(key)))
+        if primitive_word is not None:
+            return FH6_TYPE_CODE_BASE + primitive_word
+    try:
+        from fh6_typecode_import import load_font_registry, shape_type_fields
+
+        resolved_type_code, resolved_word, _font_item = shape_type_fields(shape, load_font_registry())
+        if resolved_type_code >= FH6_TYPE_CODE_BASE:
+            return int(resolved_type_code)
+        return FH6_TYPE_CODE_BASE + (int(resolved_word) & 0xFFFF)
+    except Exception:
+        return None
+
+
+def typecode_preview_word(shape):
+    type_code = typecode_preview_type_code(shape)
+    if type_code is not None:
+        return type_code & 0xFFFF
+    for key in ("type_word", "typeWord", "shape_word", "shapeWord"):
+        value = parse_preview_int(shape.get(key))
+        if value is not None:
+            return value & 0xFFFF
+    type_code = parse_preview_int(shape.get("type"))
+    if type_code is not None:
+        return type_code & 0xFFFF
+    for key in ("shape_name", "shapeName", "name", "type"):
+        word = FH6_PRIMITIVE_NAME_WORDS.get(normalize_typecode_name(shape.get(key)))
+        if word is not None:
+            return word & 0xFFFF
+    try:
+        from fh6_typecode_import import load_font_registry, shape_type_fields
+
+        _type_code, word, _font_item = shape_type_fields(shape, load_font_registry())
+        return int(word) & 0xFFFF
+    except Exception:
+        return None
+
+
+def _safe_nonzero_float(value, default=1.0):
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(numeric) or numeric == 0.0:
+        return default
+    return numeric
+
+
+def _transform_typecode_point(local_x, local_y, shape_x, shape_y, scale_x, scale_y, rotation, skew):
+    sx = _safe_nonzero_float(scale_x)
+    sy = _safe_nonzero_float(scale_y)
+    x = float(local_x) * sx
+    y = float(local_y) * sy
+    x = x + float(skew) * y
+    theta = math.radians(-float(rotation))
+    cos_t = math.cos(theta)
+    sin_t = math.sin(theta)
+    return (
+        float(shape_x) + x * cos_t - y * sin_t,
+        -float(shape_y) + x * sin_t + y * cos_t,
+    )
+
+
+def _fallback_typecode_polygons(x, y, sx, sy, rotation, skew, word):
+    base_size = FH6_CIRCLE_BASE_SIZE if word in (0x66, 0x88) else FH6_RECTANGLE_BASE_SIZE
+    if word in (0x66, 0x88):
+        points = []
+        steps = 48
+        for i in range(steps):
+            theta = (math.pi * 2.0 * i) / steps
+            points.append((math.cos(theta) * base_size, math.sin(theta) * base_size))
+        return [[_transform_typecode_point(px, py, x, y, sx, sy, rotation, skew) for px, py in points]]
+    half = base_size / 2.0
+    points = ((-half, -half), (half, -half), (half, half), (-half, half))
+    if word == 0x67:
+        points = ((0.0, -half), (half, half), (-half, half))
+    return [[_transform_typecode_point(px, py, x, y, sx, sy, rotation, skew) for px, py in points]]
+
+
+def _rotated_points(cx, cy, width, height, degrees):
+    hw = float(width) / 2.0
+    hh = float(height) / 2.0
+    theta = math.radians(float(degrees))
+    cos_t = math.cos(theta)
+    sin_t = math.sin(theta)
+    points = []
+    for x, y in ((-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)):
+        points.append((cx + x * cos_t - y * sin_t, cy + x * sin_t + y * cos_t))
+    return points
+
+
+def render_typecode_json(path, max_size=None):
+    loaded = load_pillow()
+    if not loaded:
+        return None
+    Image, ImageDraw = loaded
+    try:
+        shapes = _typecode_preview_shapes(path)
+        if not shapes:
+            return None
+        margin = 64.0
+        all_points = [point for item in shapes for polygon in item["polygons"] for point in polygon]
+        min_x = min(point[0] for point in all_points) - margin
+        max_x = max(point[0] for point in all_points) + margin
+        min_y = min(point[1] for point in all_points) - margin
+        max_y = max(point[1] for point in all_points) + margin
+        image_w = max(1, int(math.ceil(max_x - min_x)))
+        image_h = max(1, int(math.ceil(max_y - min_y)))
+        scale = preview_scale(image_w, image_h, max_size)
+        preview_w = max(1, int(round(image_w * scale)))
+        preview_h = max(1, int(round(image_h * scale)))
+        render_scale = scale * PREVIEW_JSON_SUPERSAMPLE
+        render_w = max(1, preview_w * PREVIEW_JSON_SUPERSAMPLE)
+        render_h = max(1, preview_h * PREVIEW_JSON_SUPERSAMPLE)
+        background = Image.new("RGB", (render_w, render_h), (38, 38, 38))
+        draw_bg = ImageDraw.Draw(background)
+        tile = max(8, int(round(32 * render_scale)))
+        for y in range(0, render_h, tile):
+            for x in range(0, render_w, tile):
+                if ((x // tile) + (y // tile)) % 2 == 0:
+                    draw_bg.rectangle((x, y, min(render_w, x + tile), min(render_h, y + tile)), fill=(58, 58, 58))
+        preview_layer = Image.new("RGBA", (render_w, render_h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(preview_layer, "RGBA")
+        for item in shapes:
+            r, g, b, a = item["color"]
+            if item.get("mask"):
+                mask = Image.new("L", (render_w, render_h), 0)
+                mask_draw = ImageDraw.Draw(mask)
+                for polygon in item["polygons"]:
+                    points = [((px - min_x) * render_scale, (py - min_y) * render_scale) for px, py in polygon]
+                    mask_draw.polygon(points, fill=a)
+                alpha = preview_layer.getchannel("A")
+                alpha.paste(0, (0, 0), mask)
+                preview_layer.putalpha(alpha)
+                continue
+            for polygon in item["polygons"]:
+                points = [((px - min_x) * render_scale, (py - min_y) * render_scale) for px, py in polygon]
+                draw.polygon(points, fill=(r, g, b, a))
+        preview = background.convert("RGBA")
+        preview.alpha_composite(preview_layer)
+        preview = preview.convert("RGB")
+        if PREVIEW_JSON_SUPERSAMPLE > 1:
+            preview = preview.resize((preview_w, preview_h), Image.Resampling.LANCZOS)
+        return pil_to_photo(preview)
+    except Exception:
+        return None
+
+
 def render_geometry_json(path, max_size=None):
+    typecode_preview = render_typecode_json(path, max_size)
+    if typecode_preview:
+        return typecode_preview
     pillow_preview = render_geometry_json_pillow(path, max_size)
     if pillow_preview:
         return pillow_preview
@@ -471,6 +835,10 @@ class App:
         self.detailed_log_chars = 0
         self.current_preview_request = None
         self.preview_resize_job = None
+        self.preview_render_token = 0
+        self.preview_cache = {}
+        self.preview_last_schedule_key = None
+        self.preview_display_cache_key = None
         self.update_state = {"status": "checking"}
         self.update_dialog = None
         self.update_check_started = False
@@ -486,6 +854,11 @@ class App:
         self.table_address = StringVar()
         self.inspect_table_value = StringVar()
         self.runtime_folder = StringVar(value=str(ROOT))
+        self.full_shape_count = StringVar(value="3000")
+        self.full_shape_json_path = StringVar()
+        self.full_shape_last_output_dir = StringVar(value=str(FULL_SHAPE_ROOT))
+        self.full_shape_last_report_dir = StringVar()
+        self.full_shape_clear_unused = StringVar(value="1")
         self.advanced_visible = False
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -819,15 +1192,16 @@ class App:
         self.tabs.pack(fill=BOTH, expand=True, padx=14, pady=(0, 8))
         self.generate_tab = Frame(self.tabs)
         self.import_tab = Frame(self.tabs)
-        self.tools_tab = Frame(self.tabs)
+        self.export_tab = Frame(self.tabs)
         self.tutorial_tab = Frame(self.tabs)
         self.tabs.add(self.generate_tab, text=tr(self.lang, "generate_tab"))
         self.tabs.add(self.import_tab, text=tr(self.lang, "import_tab"))
+        self.tabs.add(self.export_tab, text=tr(self.lang, "export_tab"))
         self.tabs.add(self.tutorial_tab, text=tr(self.lang, "tutorial_tab"))
 
         self._build_generate_tab()
         self._build_import_tab()
-        self._build_tools_tab()
+        self._build_export_tab()
         self._build_tutorial_tab()
         self._build_log()
         self._apply_dark_theme_recursive(self.root)
@@ -851,11 +1225,40 @@ class App:
         left = Frame(left_canvas)
         left_window = left_canvas.create_window((0, 0), window=left, anchor="nw")
 
-        def _update_scroll_region(_event=None):
+        scroll_region_job = {"id": None}
+
+        def _apply_scroll_region():
+            scroll_region_job["id"] = None
             left_canvas.configure(scrollregion=left_canvas.bbox("all"))
 
+        def _update_scroll_region(_event=None):
+            if scroll_region_job["id"] is not None:
+                return
+            scroll_region_job["id"] = left_canvas.after(LAYOUT_RESIZE_DEBOUNCE_MS, _apply_scroll_region)
+
+        canvas_width_job = {"id": None, "width": None, "applied": None}
+
+        def _apply_canvas_width():
+            canvas_width_job["id"] = None
+            width = canvas_width_job["width"]
+            if not width or width == canvas_width_job["applied"]:
+                return
+            canvas_width_job["applied"] = width
+            left_canvas.itemconfigure(left_window, width=width)
+
         def _match_canvas_width(event):
-            left_canvas.itemconfigure(left_window, width=event.width)
+            width = max(1, int(event.width))
+            bucket = max(1, LAYOUT_SIZE_BUCKET)
+            width = max(1, int(round(width / bucket) * bucket))
+            if width == canvas_width_job["width"] or width == canvas_width_job["applied"]:
+                return
+            canvas_width_job["width"] = width
+            if canvas_width_job["id"] is not None:
+                try:
+                    left_canvas.after_cancel(canvas_width_job["id"])
+                except Exception:
+                    pass
+            canvas_width_job["id"] = left_canvas.after(LAYOUT_RESIZE_DEBOUNCE_MS, _apply_canvas_width)
 
         def _mousewheel(event):
             left_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
@@ -1034,6 +1437,46 @@ class App:
         self.import_preview_label.pack(fill=BOTH, expand=True, pady=6)
         self.import_preview_label.bind("<Configure>", self._schedule_preview_refresh)
 
+    def _build_export_tab(self):
+        self._build_market_banner(self.export_tab)
+        left = Frame(self.export_tab)
+        left.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 10), pady=10)
+        right = Frame(self.export_tab)
+        right.pack(side=RIGHT, fill=BOTH, expand=True, pady=10)
+
+        intro = ttk.LabelFrame(left, text=tr(self.lang, "full_shape_intro_title"))
+        self.translated.append((intro, "full_shape_intro_title", "text"))
+        intro.pack(fill=X, pady=(0, 10))
+        self._label(intro, "full_shape_intro", anchor="w", justify=LEFT, wraplength=560, fg=Theme.WARN).pack(fill=X, padx=10, pady=8)
+
+        session = ttk.LabelFrame(left, text=tr(self.lang, "full_shape_session_title"))
+        self.translated.append((session, "full_shape_session_title", "text"))
+        session.pack(fill=X, pady=(0, 10))
+        self._label(session, "full_shape_session_hint", anchor="w", justify=LEFT, wraplength=560).pack(fill=X, padx=10, pady=(8, 4))
+        session_row = Frame(session)
+        session_row.pack(fill=X, padx=10, pady=(0, 10))
+        self._label(session_row, "pid").pack(side=LEFT)
+        Entry(session_row, textvariable=self.selected_pid, width=32).pack(side=LEFT, padx=8)
+        self._button(session_row, "refresh", self.refresh_processes).pack(side=LEFT)
+        self._label(session_row, "layer_count").pack(side=LEFT, padx=(14, 0))
+        Entry(session_row, textvariable=self.full_shape_count, width=10, font=("Segoe UI", 12)).pack(side=LEFT, padx=8)
+
+        export_box = ttk.LabelFrame(left, text=tr(self.lang, "full_shape_export_title"))
+        self.translated.append((export_box, "full_shape_export_title", "text"))
+        export_box.pack(fill=X, pady=(0, 10))
+        self._label(export_box, "full_shape_export_hint", anchor="w", justify=LEFT, wraplength=560).pack(fill=X, padx=10, pady=(8, 4))
+        export_actions = Frame(export_box)
+        export_actions.pack(fill=X, padx=10, pady=(4, 10))
+        self._button(export_actions, "full_shape_export_button", self.start_full_shape_export, font=("Segoe UI", 12, "bold"), height=2).pack(side=LEFT, fill=X, expand=True)
+        self._button(export_actions, "full_shape_open_folder", self.open_full_shape_folder, height=2).pack(side=LEFT, padx=(8, 0))
+
+        self._label(right, "full_shape_notes_title", anchor="w", font=("Segoe UI", 12, "bold")).pack(fill=X)
+        notes = Text(right, wrap="word", height=26)
+        notes.pack(fill=BOTH, expand=True, pady=6)
+        notes.insert(END, tr(self.lang, "full_shape_notes"))
+        notes.config(state="disabled")
+        self.full_shape_notes = notes
+
     def _build_tools_tab(self):
         self._build_market_banner(self.tools_tab)
         form = Frame(self.tools_tab)
@@ -1064,6 +1507,8 @@ class App:
         row.pack(fill=X, padx=14)
         self._label(row, "logs", anchor="w").pack(side=LEFT)
         self._button(row, "export_logs", self.export_detailed_log).pack(side=RIGHT)
+        self.full_shape_report_button = self._button(row, "export_full_shape_report", self.export_full_shape_report, state="disabled")
+        self.full_shape_report_button.pack(side=RIGHT, padx=(0, 8))
         self._label(row, "progress", anchor="e").pack(side=LEFT, padx=(18, 4))
         Label(row, textvariable=self.progress_text, anchor="w", fg="#005a9e").pack(side=LEFT, fill=X, expand=True)
         self.log = Text(self.root, height=9)
@@ -1088,6 +1533,7 @@ class App:
                 pass
         self.tabs.tab(self.generate_tab, text=tr(self.lang, "generate_tab"))
         self.tabs.tab(self.import_tab, text=tr(self.lang, "import_tab"))
+        self.tabs.tab(self.export_tab, text=tr(self.lang, "export_tab"))
         self.tabs.tab(self.tutorial_tab, text=tr(self.lang, "tutorial_tab"))
         if self.photo is None:
             self.preview_label.config(text=tr(self.lang, "preview_hint"))
@@ -1095,6 +1541,11 @@ class App:
                 self.import_preview_label.config(text=tr(self.lang, "preview_hint"))
         if hasattr(self, "advanced_button"):
             self.advanced_button.config(text=tr(self.lang, "hide_advanced" if self.advanced_visible else "show_advanced"))
+        if hasattr(self, "full_shape_notes"):
+            self.full_shape_notes.config(state="normal")
+            self.full_shape_notes.delete("1.0", END)
+            self.full_shape_notes.insert(END, tr(self.lang, "full_shape_notes"))
+            self.full_shape_notes.config(state="disabled")
         self._update_tutorial()
         self.status.set(tr(self.lang, "ready"))
 
@@ -1361,6 +1812,49 @@ class App:
             self.log_line(f"Failed to export detailed log: {exc}")
             return
         self.log_line(f"Detailed log exported: {output} ({len(text)} chars, limit {DETAILED_LOG_OUTPUT_LIMIT}).")
+
+    def export_full_shape_report(self):
+        report_dir_text = str(self.full_shape_last_report_dir.get() or "").strip()
+        if not report_dir_text:
+            self.log_line(tr(self.lang, "full_shape_no_report"))
+            return
+        report_dir = Path(report_dir_text)
+        if not report_dir.exists() or not report_dir.is_dir():
+            self.log_line(tr(self.lang, "full_shape_no_report"))
+            return
+        initial = f"forza-painter-fh6-full-shape-report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+        output = filedialog.asksaveasfilename(
+            title=tr(self.lang, "export_full_shape_report"),
+            defaultextension=".zip",
+            initialfile=initial,
+            filetypes=[("ZIP archive", "*.zip"), ("All files", "*.*")],
+        )
+        if not output:
+            return
+        output_path = Path(output)
+        try:
+            with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as archive:
+                for path in sorted(report_dir.rglob("*")):
+                    if path.is_file():
+                        archive.write(path, path.relative_to(report_dir))
+        except OSError as exc:
+            self.log_line(f"{tr(self.lang, 'full_shape_report_export_failed')}: {exc}")
+            return
+        self.log_line(tr(self.lang, "full_shape_report_exported").format(path=output_path))
+
+    def show_full_shape_failure_prompt(self, detail):
+        message = tr(self.lang, "full_shape_failure_prompt").format(detail=detail)
+        try:
+            messagebox.showwarning(tr(self.lang, "full_shape_failed"), message)
+        except Exception:
+            self.log_line(message)
+
+    def show_full_shape_import_success_prompt(self, count):
+        message = tr(self.lang, "full_shape_import_success_prompt").format(count=count)
+        try:
+            messagebox.showinfo(tr(self.lang, "full_shape_import_done_title"), message)
+        except Exception:
+            self.log_line(message)
 
     def start_update_check(self):
         if self.closed or self.update_check_started:
@@ -1706,6 +2200,7 @@ class App:
             except IndexError:
                 pass
         self._render_lists()
+        self.current_preview_request = None
         self.preview_label.config(image="", text=tr(self.lang, "preview_hint"))
         self.preview_label.image = None
 
@@ -1768,6 +2263,7 @@ class App:
             except IndexError:
                 pass
         self._render_lists()
+        self.current_preview_request = None
         if hasattr(self, "import_preview_label"):
             self.import_preview_label.config(image="", text=tr(self.lang, "preview_hint"))
             self.import_preview_label.image = None
@@ -1798,12 +2294,19 @@ class App:
                 pass
         return getattr(self, "preview_label", None)
 
+    def _preview_labels(self):
+        labels = []
+        for name in ("preview_label", "import_preview_label"):
+            label = getattr(self, name, None)
+            if label is not None:
+                labels.append(label)
+        return labels
+
     def _preview_bounds(self, label=None):
         label = label or self._active_preview_label()
         if label is None:
             return PREVIEW_MAX, PREVIEW_MAX
         try:
-            self.root.update_idletasks()
             width = label.winfo_width()
             height = label.winfo_height()
         except Exception:
@@ -1812,15 +2315,59 @@ class App:
             return PREVIEW_MAX, PREVIEW_MAX
         return max(1, width - 16), max(1, height - 16)
 
-    def _schedule_preview_refresh(self, _event=None):
+    def _bucket_preview_bounds(self, bounds):
+        try:
+            width, height = bounds
+            width = int(width)
+            height = int(height)
+        except (TypeError, ValueError):
+            return PREVIEW_MAX, PREVIEW_MAX
+        bucket = max(1, PREVIEW_SIZE_BUCKET)
+        return (
+            max(1, int(round(width / bucket) * bucket)),
+            max(1, int(round(height / bucket) * bucket)),
+        )
+
+    def _schedule_preview_refresh(self, _event=None, delay=None):
         if not self.current_preview_request or self.closed:
             return
+        label = self._active_preview_label()
+        event_widget = getattr(_event, "widget", None)
+        if event_widget in self._preview_labels():
+            if event_widget is not label:
+                return
+            bounds = self._bucket_preview_bounds((getattr(_event, "width", 0), getattr(_event, "height", 0)))
+        else:
+            bounds = self._bucket_preview_bounds(self._preview_bounds(label))
+        schedule_key = (self.current_preview_request, bounds, id(label) if label is not None else None)
+        if schedule_key == self.preview_last_schedule_key:
+            return
+        self.preview_last_schedule_key = schedule_key
         if self.preview_resize_job is not None:
             try:
                 self.root.after_cancel(self.preview_resize_job)
             except Exception:
                 pass
-        self.preview_resize_job = self.root.after(180, self._refresh_current_preview)
+        if delay is None:
+            delay = PREVIEW_RESIZE_DEBOUNCE_MS
+        self.preview_resize_job = self.root.after(max(1, int(delay)), self._refresh_current_preview)
+
+    def _preview_cache_key(self, request, bounds):
+        kind, path_text = request
+        path = Path(path_text)
+        try:
+            stat = path.stat()
+            stamp = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            stamp = (0, 0)
+        return kind, str(path), stamp, bounds
+
+    def _remember_preview_cache(self, key, data):
+        if not data:
+            return
+        self.preview_cache[key] = data
+        while len(self.preview_cache) > PREVIEW_CACHE_LIMIT:
+            self.preview_cache.pop(next(iter(self.preview_cache)))
 
     def _refresh_current_preview(self):
         self.preview_resize_job = None
@@ -1831,68 +2378,64 @@ class App:
         path = Path(path)
         if not path.exists():
             return
+        bounds = self._bucket_preview_bounds(self._preview_bounds())
+        cache_key = self._preview_cache_key(request, bounds)
+        cached = self.preview_cache.get(cache_key)
+        if cached:
+            display_key = (cache_key, id(self._active_preview_label()))
+            if display_key == self.preview_display_cache_key:
+                return
+            self.preview_display_cache_key = display_key
+            self.show_preview(cached)
+            return
+        self.preview_render_token += 1
+        token = self.preview_render_token
+        threading.Thread(target=self._preview_render_worker, args=(token, request, bounds, cache_key), daemon=True).start()
+
+    def _preview_render_worker(self, token, request, bounds, cache_key):
+        kind, path = request
+        path = Path(path)
         if kind == "json":
-            data = render_geometry_json(path, self._preview_bounds())
+            data = render_geometry_json(path, bounds)
         else:
-            data = render_source_image(path, self._preview_bounds())
-        self.show_preview(data)
+            data = render_source_image(path, bounds)
+        self.queue.put(("preview_rendered", (token, request, cache_key, data)))
 
     def show_json_preview(self, path):
         path = Path(path)
-        self.current_preview_request = ("json", path)
-        self.show_preview(render_geometry_json(path, self._preview_bounds()))
+        self.current_preview_request = ("json", str(path))
+        self.preview_last_schedule_key = None
+        self._schedule_preview_refresh(delay=PREVIEW_RENDER_START_MS)
 
     def show_preview(self, data):
+        label = self._active_preview_label()
         if not data:
             self.current_preview_request = None
+            self.preview_last_schedule_key = None
+            self.preview_display_cache_key = None
             message = tr(self.lang, "preview_unavailable")
-            self.preview_label.config(image="", text=message, bg="#202020")
-            self.preview_label.image = None
-            if hasattr(self, "import_preview_label"):
-                self.import_preview_label.config(image="", text=message, bg="#202020")
-                self.import_preview_label.image = None
+            if label is not None:
+                label.config(image="", text=message, bg="#202020")
+                label.image = None
             return
         self.photo = data
         image = PhotoImage(data=data)
-        self.preview_label.config(image=image, text="", bg="#202020")
-        self.preview_label.image = image
-        if hasattr(self, "import_preview_label"):
-            import_image = PhotoImage(data=data)
-            self.import_preview_label.config(image=import_image, text="", bg="#202020")
-            self.import_preview_label.image = import_image
+        if label is not None:
+            label.config(image=image, text="", bg="#202020")
+            label.image = image
 
     def show_source_preview(self, path):
         path = Path(path)
-        self.current_preview_request = ("source", path)
-        data = render_source_image(path, self._preview_bounds())
-        if data:
-            self.show_preview(data)
-            return
-        if Path(path).suffix.lower() in (".png", ".gif"):
-            self.show_preview_file(path, remember=False)
-            return
-        self.show_preview(None)
+        self.current_preview_request = ("source", str(path))
+        self.preview_last_schedule_key = None
+        self._schedule_preview_refresh(delay=PREVIEW_RENDER_START_MS)
 
     def show_preview_file(self, path, remember=True):
         path = Path(path)
         if remember:
-            self.current_preview_request = ("file", path)
-        data = render_source_image(path, self._preview_bounds())
-        if data:
-            self.show_preview(data)
-            return
-        try:
-            image = PhotoImage(file=str(path))
-        except Exception:
-            self.show_preview(None)
-            return
-        self.photo = image
-        self.preview_label.config(image=image, text="", bg="#202020")
-        self.preview_label.image = image
-        if hasattr(self, "import_preview_label"):
-            import_image = PhotoImage(file=str(path))
-            self.import_preview_label.config(image=import_image, text="", bg="#202020")
-            self.import_preview_label.image = import_image
+            self.current_preview_request = ("file", str(path))
+            self.preview_last_schedule_key = None
+        self._schedule_preview_refresh(delay=PREVIEW_RENDER_START_MS)
 
     def refresh_processes(self):
         self.processes = game_processes()
@@ -2203,6 +2746,14 @@ class App:
         joined = " ".join(str(x) for x in cmd)
         if "fh6_probe.py" in joined and "--auto-locate" in joined:
             return tr(self.lang, "locating")
+        if "fh6_typecode_probe" in joined:
+            return tr(self.lang, "full_shape_locating")
+        if "fh6_typecode_import" in joined:
+            return tr(self.lang, "full_shape_importing")
+        if "fh6_typecode_export" in joined:
+            return tr(self.lang, "full_shape_exporting")
+        if "fh6_typecode_trim" in joined:
+            return tr(self.lang, "full_shape_trimming")
         if "main.py" in joined:
             return tr(self.lang, "importing")
         return "Starting helper..."
@@ -2308,6 +2859,7 @@ class App:
         if not self.json_files:
             self.log_line("No JSON files selected.")
             return
+        paths = self._json_paths_for_import()
         layer_count = self.layer_count.get().strip()
         if not layer_count:
             self.log_line(tr(self.lang, "layer_count_required"))
@@ -2318,13 +2870,51 @@ class App:
         if not pid:
             return
         self.status.set(tr(self.lang, "running"))
-        threading.Thread(target=self._import_worker, args=(pid,), daemon=True).start()
+        threading.Thread(target=self._import_worker, args=(pid, paths), daemon=True).start()
 
-    def _import_worker(self, pid):
+    def _json_paths_for_import(self):
+        try:
+            selection = self.json_list.curselection()
+        except Exception:
+            selection = ()
+        if selection:
+            return [self.json_files[selection[0]]]
+        return list(self.json_files)
+
+    def _import_worker(self, pid, paths):
         game = self.selected_game.get() or "fh6"
         count_address = parse_hex_or_empty(self.count_address.get())
         table_address = parse_hex_or_empty(self.table_address.get())
         layer_count = self.layer_count.get().strip()
+        typecode_paths = [path for path in paths if is_typecode_json(path)]
+        if typecode_paths:
+            if game != "fh6":
+                self.queue.put(("log", "Full-shape JSON import is only supported for FH6."))
+                self.queue.put(("status", tr(self.lang, "failed")))
+                return
+            if len(paths) != 1:
+                self.queue.put(("log", tr(self.lang, "full_shape_single_json_required")))
+                self.queue.put(("status", tr(self.lang, "failed")))
+                return
+            try:
+                template_count = int(layer_count)
+                shape_count = typecode_shape_count(typecode_paths[0])
+            except Exception as exc:
+                self.queue.put(("log", f"{tr(self.lang, 'full_shape_invalid_json')}: {exc}"))
+                self.queue.put(("status", tr(self.lang, "failed")))
+                return
+            if shape_count > template_count:
+                self.queue.put(("log", f"{tr(self.lang, 'full_shape_too_many_shapes')} JSON={shape_count}, template={template_count}"))
+                self.queue.put(("status", tr(self.lang, "failed")))
+                return
+            self._full_shape_import_worker(
+                pid,
+                template_count,
+                shape_count,
+                Path(typecode_paths[0]),
+                True,
+            )
+            return
         if not count_address and not table_address and game == "fh6":
             clear_session_location()
             if pid and layer_count:
@@ -2337,7 +2927,7 @@ class App:
                 else:
                     self.queue.put(("status", tr(self.lang, "failed")))
                     return
-        for path in list(self.json_files):
+        for path in list(paths):
             if game == "fh6" and layer_count:
                 self._check_json_layer_fit(path, layer_count)
             cmd = [*helper_command("main"), "--game", game, "--no-preview"]
@@ -2355,6 +2945,345 @@ class App:
                 self.queue.put(("status", tr(self.lang, "failed")))
                 return
         self.queue.put(("status", tr(self.lang, "done")))
+
+    def choose_full_shape_json(self):
+        path = filedialog.askopenfilename(
+            title=tr(self.lang, "full_shape_choose_json"),
+            filetypes=[("Full-shape JSON", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        selected = Path(path)
+        self.full_shape_json_path.set(str(selected))
+        try:
+            count = typecode_shape_count(selected)
+            self.log_line(f"{tr(self.lang, 'full_shape_selected_json')} {selected.name} ({count} shapes)")
+        except Exception as exc:
+            self.log_line(f"{tr(self.lang, 'full_shape_invalid_json')}: {exc}")
+
+    def open_full_shape_folder(self):
+        folder = Path(self.full_shape_last_output_dir.get() or FULL_SHAPE_ROOT)
+        folder.mkdir(parents=True, exist_ok=True)
+        os.startfile(folder)
+
+    def _full_shape_count_value(self):
+        try:
+            count = int(str(self.full_shape_count.get()).strip())
+        except ValueError:
+            self.log_line(tr(self.lang, "full_shape_count_required"))
+            return None
+        if count <= 0:
+            self.log_line(tr(self.lang, "full_shape_count_required"))
+            return None
+        return count
+
+    def _full_shape_run_dir(self, prefix, name):
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(name or "run")).strip("-") or "run"
+        run_dir = FULL_SHAPE_ROOT / f"{prefix}-{safe_name}-{timestamp}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        return run_dir
+
+    def start_full_shape_import(self):
+        pid = self.ensure_live_game_pid()
+        if not pid:
+            return
+        if self.layer_count.get().strip():
+            self.full_shape_count.set(self.layer_count.get().strip())
+        template_count = self._full_shape_count_value()
+        if not template_count:
+            return
+        json_path = Path(self.full_shape_json_path.get().strip())
+        if not json_path.exists():
+            self.log_line(tr(self.lang, "full_shape_no_json"))
+            return
+        try:
+            shape_count = typecode_shape_count(json_path)
+        except Exception as exc:
+            self.log_line(f"{tr(self.lang, 'full_shape_invalid_json')}: {exc}")
+            return
+        if shape_count <= 0:
+            self.log_line(tr(self.lang, "full_shape_no_shapes"))
+            return
+        if shape_count > template_count:
+            self.log_line(f"{tr(self.lang, 'full_shape_too_many_shapes')} JSON={shape_count}, template={template_count}")
+            return
+        self.status.set(tr(self.lang, "running"))
+        self.full_shape_last_output_dir.set(str(FULL_SHAPE_ROOT))
+        threading.Thread(
+            target=self._full_shape_import_worker,
+            args=(
+                pid,
+                template_count,
+                shape_count,
+                json_path,
+                self.full_shape_clear_unused.get() == "1",
+            ),
+            daemon=True,
+        ).start()
+
+    def start_full_shape_export(self):
+        pid = self.ensure_live_game_pid()
+        if not pid:
+            return
+        template_count = self._full_shape_count_value()
+        if not template_count:
+            return
+        initial_dir = Path(self.full_shape_last_output_dir.get() or FULL_SHAPE_ROOT)
+        initial_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        output = filedialog.asksaveasfilename(
+            title=tr(self.lang, "full_shape_export_button"),
+            initialdir=initial_dir,
+            initialfile=f"fh6-full-shape-export-{template_count}-{timestamp}.json",
+            defaultextension=".json",
+            filetypes=[("Full-shape JSON", "*.json"), ("All files", "*.*")],
+        )
+        if not output:
+            return
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.full_shape_last_output_dir.set(str(output_path.parent))
+        self.status.set(tr(self.lang, "running"))
+        threading.Thread(target=self._full_shape_export_worker, args=(pid, template_count, output_path), daemon=True).start()
+
+    def _candidate_shape_count(self, candidate, shape_byte):
+        counts = candidate.get("shape_id_counts_all") or {}
+        return int(counts.get(str(shape_byte)) or counts.get(shape_byte) or 0)
+
+    def _candidate_rejection(self, candidate, template_count, require_circle_template):
+        valid_ptrs = int(candidate.get("valid_ptrs") or 0)
+        sample_ok = int(candidate.get("sample_ok_count") or 0)
+        min_sample_ok = min(8, int(template_count))
+        vector_count = candidate.get("vector_count")
+        capacity_count = candidate.get("capacity_count")
+        if candidate.get("vector_ok") is False:
+            return "vector metadata invalid"
+        if vector_count is not None and int(vector_count) != int(template_count):
+            return f"vector_count={vector_count}"
+        if capacity_count is not None and int(capacity_count) < int(template_count):
+            return f"capacity_count={capacity_count}"
+        if valid_ptrs < int(template_count):
+            return f"valid_ptrs={valid_ptrs}"
+        if sample_ok < min_sample_ok:
+            return f"sample_ok={sample_ok}"
+        if require_circle_template:
+            min_circle_count = int(int(template_count) * 0.90)
+            circle_count = self._candidate_shape_count(candidate, 102)
+            if circle_count < min_circle_count:
+                return f"circle_template_check={circle_count}/{template_count}"
+        return ""
+
+    def _locate_full_shape_group(self, pid, template_count, run_dir, purpose):
+        probe_report = run_dir / f"fallback-{purpose}-probe.json"
+        cmd = [
+            *helper_command("fh6_typecode_probe"),
+            "--pid",
+            str(pid),
+            "--count",
+            str(template_count),
+            "--max-seconds",
+            "120",
+            "--report-layers",
+            "40",
+            "--out-dir",
+            run_dir,
+        ]
+        self.queue.put(("log", tr(self.lang, "full_shape_probe_wait")))
+        code = self.run_subprocess(cmd, timeout=180)
+        if code != 0:
+            raise RuntimeError("full-shape probe did not complete")
+        probe_files = sorted(run_dir.glob(f"fh6-group{template_count}-probe-*.json"), key=lambda path: path.stat().st_mtime)
+        if not probe_files:
+            raise RuntimeError("full-shape probe report was not created")
+        if probe_report.exists():
+            probe_report.unlink()
+        probe_files[-1].replace(probe_report)
+        probe = json.loads(probe_report.read_text(encoding="utf-8"))
+        candidates = probe.get("candidates") or []
+        if not candidates:
+            raise RuntimeError("no matching loaded FH6 group was found")
+
+        require_circle_template = str(purpose).startswith("import")
+        rejected = []
+        selected = None
+        strong_export_candidates = []
+        for index, candidate in enumerate(candidates, start=1):
+            group = candidate.get("group")
+            table = candidate.get("table")
+            rejection = self._candidate_rejection(candidate, template_count, require_circle_template)
+            if group and table and not rejection and selected is None:
+                selected = (index, group, table, int(candidate.get("valid_ptrs") or 0), int(candidate.get("sample_ok_count") or 0), self._candidate_shape_count(candidate, 102))
+            else:
+                rejected.append(f"#{index}: {rejection or 'missing group/table'}")
+            if not require_circle_template and group and table and not rejection:
+                signature = (
+                    tuple(sorted((candidate.get("shape_id_counts_sample") or {}).items())),
+                    tuple(sorted((candidate.get("color_counts_sample") or {}).items())),
+                )
+                strong_export_candidates.append((index, candidate, signature, int(candidate.get("score") or 0)))
+
+        if not require_circle_template and strong_export_candidates:
+            best_score = max(score for _index, _candidate, _signature, score in strong_export_candidates)
+            score_floor = best_score - max(10, int(best_score * 0.02))
+            seen = {}
+            for index, candidate, signature, score in strong_export_candidates:
+                if score < score_floor:
+                    continue
+                previous = seen.get(signature)
+                if previous:
+                    prev_index, prev_candidate = previous
+                    raise RuntimeError(
+                        "export refused: duplicate full-strength editable-looking layer tables "
+                        f"(#{prev_index} {prev_candidate.get('group')} and #{index} {candidate.get('group')})"
+                    )
+                seen[signature] = (index, candidate)
+
+        if not selected:
+            detail = "; ".join(rejected[:5]) if rejected else "no candidates"
+            if require_circle_template:
+                raise RuntimeError(tr(self.lang, "full_shape_fresh_template_required").format(detail=detail))
+            raise RuntimeError(f"located group did not validate strongly enough ({detail})")
+        index, group, table, valid_ptrs, sample_ok, circle_count = selected
+        circle_suffix = f", circle_template={circle_count}/{template_count}" if require_circle_template else ""
+        self.queue.put(("log", f"FH6 full-shape group located: candidate #{index}, group={group}, table={table}, layers={template_count}, valid_ptrs={valid_ptrs}, sample_ok={sample_ok}{circle_suffix}"))
+        return group, table, probe_report
+
+    def _full_shape_import_worker(self, pid, template_count, shape_count, json_path, clear_unused):
+        run_dir = self._full_shape_run_dir("import", json_path.stem)
+        self.queue.put(("full_shape_report_dir", run_dir))
+        backup_path = run_dir / "import-backup.json"
+        import_report = run_dir / "import-report.json"
+        trim_backup = run_dir / "trim-backup.json"
+        try:
+            self.queue.put(("log", f"{tr(self.lang, 'full_shape_importing')} shapes={shape_count}, template={template_count}"))
+            group, table, _probe_report = self._locate_full_shape_group(pid, template_count, run_dir, "import-template")
+            import_cmd = [
+                *helper_command("fh6_typecode_import"),
+                "--pid",
+                str(pid),
+                "--table",
+                str(table),
+                "--json",
+                json_path,
+                "--template-count",
+                str(template_count),
+                "--compact-supported-layers",
+                "--allow-unknown-low-byte",
+                "--backup",
+                backup_path,
+                "--report",
+                import_report,
+                "--write",
+            ]
+            if clear_unused:
+                import_cmd.append("--clear-unused")
+            code = self.run_subprocess(import_cmd, timeout=360)
+            if code != 0:
+                self.queue.put(("full_shape_failed_prompt", "import helper exited with an error"))
+                self.queue.put(("status", tr(self.lang, "failed")))
+                return
+            report = json.loads(import_report.read_text(encoding="utf-8"))
+            imported = int(report.get("imported_layer_count") or 0)
+            failures = int(report.get("failure_count") or 0)
+            unsupported = int(report.get("unsupported_shape_count") or 0)
+            if unsupported:
+                self.queue.put(("log", f"Unsupported full-shape rows skipped: {unsupported}"))
+            if failures:
+                self.queue.put(("log", f"Full-shape import wrote with failures: imported={imported}, failures={failures}"))
+                self.queue.put(("full_shape_failed_prompt", f"imported={imported}, failures={failures}"))
+                self.queue.put(("status", tr(self.lang, "failed")))
+                return
+            if imported <= 0:
+                failure = "Full-shape import failed: no layers were imported."
+                self.queue.put(("log", failure))
+                self.queue.put(("full_shape_failed_prompt", failure))
+                self.queue.put(("status", tr(self.lang, "failed")))
+                return
+            trim_cmd = [
+                *helper_command("fh6_typecode_trim"),
+                "--pid",
+                str(pid),
+                "--group",
+                str(group),
+                "--table",
+                str(table),
+                "--new-count",
+                str(imported),
+                "--trim-vector-end",
+                "--backup",
+                trim_backup,
+                "--write",
+            ]
+            code = self.run_subprocess(trim_cmd, timeout=90)
+            if code != 0:
+                failure = "Full-shape import wrote layers but failed while trimming layer count."
+                self.queue.put(("log", failure))
+                self.queue.put(("full_shape_failed_prompt", failure))
+                self.queue.put(("status", tr(self.lang, "failed")))
+                return
+            self.queue.put(("log", tr(self.lang, "full_shape_import_done").format(count=imported)))
+            self.queue.put(("full_shape_import_success_prompt", imported))
+            self.queue.put(("status", tr(self.lang, "done")))
+        except Exception as exc:
+            self.queue.put(("log", f"{tr(self.lang, 'full_shape_failed')}: {exc}"))
+            self.queue.put(("full_shape_failed_prompt", str(exc)))
+            self.queue.put(("status", tr(self.lang, "failed")))
+
+    def _full_shape_export_worker(self, pid, template_count, output_path):
+        run_dir = self._full_shape_run_dir("export", output_path.stem)
+        self.queue.put(("full_shape_report_dir", run_dir))
+        self.queue.put(("full_shape_output_dir", output_path.parent))
+        export_report = run_dir / "export-report.json"
+        try:
+            group, table, probe_report = self._locate_full_shape_group(pid, template_count, run_dir, "export-template")
+            export_cmd = [
+                *helper_command("fh6_typecode_export"),
+                "--pid",
+                str(pid),
+                "--group",
+                str(group),
+                "--table",
+                str(table),
+                "--count",
+                str(template_count),
+                "--out",
+                output_path,
+                "--report",
+                export_report,
+                "--probe-report",
+                probe_report,
+            ]
+            code = self.run_subprocess(export_cmd, timeout=360)
+            if code != 0:
+                prompt_detail = "export helper exited with an error"
+                if export_report.exists():
+                    try:
+                        report = json.loads(export_report.read_text(encoding="utf-8"))
+                        refusal = report.get("refusal_reason")
+                        reasons = report.get("validation_reasons") or []
+                        if refusal:
+                            self.queue.put(("log", str(refusal)))
+                            prompt_detail = str(refusal)
+                        if reasons:
+                            self.queue.put(("log", "Export validation: " + "; ".join(str(reason) for reason in reasons[:4])))
+                    except Exception:
+                        pass
+                self.queue.put(("full_shape_failed_prompt", prompt_detail))
+                self.queue.put(("status", tr(self.lang, "failed")))
+                return
+            report = json.loads(export_report.read_text(encoding="utf-8"))
+            exported = int(report.get("exported_shape_count") or 0)
+            failures = int(report.get("failure_count") or 0)
+            if failures:
+                self.queue.put(("log", f"Export warning: {failures} unreadable layer(s), see report."))
+            self.queue.put(("full_shape_json_path", output_path))
+            self.queue.put(("log", tr(self.lang, "full_shape_export_done").format(count=exported, path=output_path)))
+            self.queue.put(("status", tr(self.lang, "done")))
+        except Exception as exc:
+            self.queue.put(("log", f"{tr(self.lang, 'full_shape_failed')}: {exc}"))
+            self.queue.put(("full_shape_failed_prompt", str(exc)))
+            self.queue.put(("status", tr(self.lang, "failed")))
 
     def start_diagnose(self):
         pid = self.ensure_live_game_pid()
@@ -2473,6 +3402,12 @@ class App:
                     self.log_line(tr(self.lang, "generation_stopped"))
             elif kind == "preview":
                 self.show_preview(payload)
+            elif kind == "preview_rendered":
+                token, request, cache_key, data = payload
+                if token == self.preview_render_token and request == self.current_preview_request:
+                    self._remember_preview_cache(cache_key, data)
+                    self.preview_display_cache_key = (cache_key, id(self._active_preview_label())) if data else None
+                    self.show_preview(data)
             elif kind == "preview_json":
                 self.show_json_preview(payload)
             elif kind == "preview_file":
@@ -2485,6 +3420,18 @@ class App:
                 self._handle_update_current(payload)
             elif kind == "update_available":
                 self._handle_update_available(payload)
+            elif kind == "full_shape_json_path":
+                self.full_shape_json_path.set(str(payload))
+            elif kind == "full_shape_output_dir":
+                self.full_shape_last_output_dir.set(str(payload))
+            elif kind == "full_shape_report_dir":
+                self.full_shape_last_report_dir.set(str(payload))
+                if hasattr(self, "full_shape_report_button"):
+                    self.full_shape_report_button.config(state="normal")
+            elif kind == "full_shape_failed_prompt":
+                self.show_full_shape_failure_prompt(payload)
+            elif kind == "full_shape_import_success_prompt":
+                self.show_full_shape_import_success_prompt(payload)
         if not self.closed:
             self.root.after(100, self._poll_queue)
 

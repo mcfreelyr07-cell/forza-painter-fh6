@@ -15,12 +15,12 @@
 </p>
 
 <p align="center">
-  <code>v1.7.0</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>One-file EXE</code>
+  <code>v1.8.0</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>One-file EXE</code>
 </p>
 
 Convert PNG/JPG/BMP images into Forza Horizon 6 Vinyl Group layers. The app handles generation, preview, and import in one desktop window; normal users do not need Python, `.venv`, batch files, or manual memory addresses.
 
-> **Download the EXE:** get `forza-painter-fh6-v1.7.0.exe` from [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) and run it directly.
+> **Download the EXE:** get `forza-painter-fh6-v1.8.0.exe` from [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) and run it directly.
 
 > **Preset Market:** browse shared images, presets, and JSON packages at https://painter6.com or use the new in-app market banner.
 
@@ -34,12 +34,13 @@ Convert PNG/JPG/BMP images into Forza Horizon 6 Vinyl Group layers. The app hand
 | Preview output | Show source and generated geometry previews inside the app. |
 | Import to FH6 | Import JSON into the currently open FH6 Vinyl Group Editor. |
 | Safe FH6 workflow | Auto-locate and verify the editable layer table before writing. |
+| Full-shape import/export | Experimental type-code import on the Import page and current-group export on the Export page. |
 | Preset Market | Open https://painter6.com from the app to browse shared images, presets, and JSON packages. |
 | Update check | Check for new versions on startup and show changelog notes when available. |
 
 ## Quick Start
 
-1. Download `forza-painter-fh6-v1.7.0.exe` from [Releases](https://github.com/bvzrays/forza-painter-fh6/releases).
+1. Download `forza-painter-fh6-v1.8.0.exe` from [Releases](https://github.com/bvzrays/forza-painter-fh6/releases).
 2. Put the EXE in a normal writable folder, for example `Desktop\forza-painter-fh6`.
 3. Double-click the EXE. For FH6 import, run it as administrator if Windows blocks process access.
 4. In FH6, open `Create Vinyl Group` / `Vinyl Group Editor`, load a sphere template, then `Ungroup` it.
@@ -105,6 +106,23 @@ One image can generate multiple checkpoint JSON files. Prefer the highest-layer 
 
 FH needs 4 extra boundary layers to save the cover and apply bounds correctly. Example: a 1000-layer JSON should use at least a 1004-layer template; a 3000-layer template can import about 2996 drawable shapes.
 
+## Experimental Full-Shape Import/Export
+
+v1.8.0 adds FH6 type-code JSON research support directly to the main workflow: import full-shape/type-code JSONs from the `Import` page, and export the current editable FH6 group from the `Export` page.
+
+Use this only for full-shape JSONs. Normal generated ellipse JSON should still use the regular `Import` page.
+
+- Export is read-only and validates the editable FH6 layer table before writing JSON.
+- Import auto-detects full-shape/type-code JSONs from the normal JSON list and expects a saved/reopened plain white circle template, usually 3000 layers, ungrouped before import.
+- Supported full-shape JSON markers include `type_word`, `shape_word`, FH6 full type codes, Kloudy/Fabric handmade JSON fields, font-shape fields, and simple primitive names like `Circle`, `Square`, `Triangle`, and `Ellipse`.
+- Type-code JSON previews use bundled FH6 vinyl vertex resources, so multi-shape JSONs from the new exporter and Kloudy/Fabric-style handmade JSONs can be previewed without rectangle fallbacks.
+- Mask layers are previewed as transparent cutouts against already drawn lower layers; FH6 UI thumbnails may still show the mask shape itself.
+- After full-shape import, save and reopen the vinyl group before judging the result; FH6 can keep showing stale live template resources in the current editor.
+- If full-shape import/export fails, the app shows a direct reminder for the important FH6/editor/template checks. Use `Export full-shape report` only when you need to send debug data.
+- The importer writes only stable visual fields and the 16-bit shape word at layer offset `0x7A`.
+- It does not copy volatile FH6 resource pointers such as `0xA8`.
+- After import completes, save and reload the FH6 vinyl group before judging stale UI thumbnails.
+
 ## Important Rules
 
 - The FH6 template must be ungrouped before import.
@@ -117,7 +135,7 @@ FH needs 4 extra boundary layers to save the cover and apply bounds correctly. E
 
 ## Runtime Files
 
-The one-file EXE extracts its internal files temporarily and stores normal runtime data outside the EXE. The app shows the exact paths in the startup log and on the `Tools` page.
+The one-file EXE extracts its internal files temporarily and stores normal runtime data outside the EXE. The app shows the exact paths in the startup log.
 
 Expected external folders beside the EXE:
 
@@ -144,6 +162,13 @@ These folders can be deleted when the app is closed if you want to reset local r
 ## Changelog
 
 Only versioned release entries are kept here. See [CHANGELOG.md](CHANGELOG.md) for the app update prompt changelog.
+
+### v1.8.0 / 2026-06-01
+
+- Updated the app version to `v1.8.0`; release packages now use `forza-painter-fh6-v1.8.0.exe`.
+- Added experimental full-shape import/export flow: full-shape import lives on the `Import` page, and current-group export lives on the `Export` page.
+- Full-shape import/export uses the 16-bit shape word at layer offset `0x7A` and avoids volatile resource pointers such as `0xA8`.
+- Included Kloudy's FH6 Painter custom-importer attribution, font-shape registry, and FH6 vinyl resource data for type-code JSON support and previews.
 
 ### v1.7.0 / 2026-06-01
 
