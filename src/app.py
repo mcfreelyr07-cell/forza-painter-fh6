@@ -20,7 +20,7 @@ import zipfile
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from tkinter import BOTH, END, LEFT, RIGHT, X, Button, Canvas, Checkbutton, Entry, Frame, Label, Listbox, PhotoImage, StringVar, Text, Tk, Toplevel, filedialog, messagebox, ttk
+from tkinter import BOTH, END, LEFT, RIGHT, X, Button, Canvas, Checkbutton, Entry, Frame, IntVar, Label, Listbox, PhotoImage, StringVar, Text, Tk, Toplevel, filedialog, messagebox, ttk
 
 import psutil
 
@@ -29,6 +29,7 @@ from fh6_vinyl_resources import load_vinyl_polygons
 from game_profiles import PROFILES
 from geometry_json import RECTANGLE, ROTATED_ELLIPSE, load_normalized_geometry
 from generator_backend import GENERATOR_EXE, GENERATOR_JSON_SCAN_SECONDS, GENERATOR_POLL_SLEEP_SECONDS, GENERATOR_PREVIEW_SCAN_SECONDS, USER_SETTINGS_DIR, best_geometry_jsons, build_generator_command, build_generator_env, generated_jsons, generated_preview_files, generator_preview_path, load_settings, preprocess_input_image, write_custom_settings, write_user_settings_preset
+from region_painter.workflow import get_status as region_get_status, run_first_pass, run_region_pass
 from version import APP_DISPLAY_NAME, __version__, app_title
 
 
@@ -861,6 +862,27 @@ class App:
         self.full_shape_last_report_dir = StringVar()
         self.full_shape_clear_unused = StringVar(value="1")
         self.advanced_visible = False
+        # Region Paint state
+        self.region_images: list[Path] = []
+        self.region_selected_profile = StringVar()
+        self.region_total_var = StringVar(value="2000")
+        self.region_first_var = StringVar(value="1000")
+        self.region_layers_var = StringVar(value="300")
+        self.region_remaining_var = StringVar(value="2000")
+        self.region_tool = StringVar(value="rect")
+        self.region_shapes: list[dict] = []
+        self.region_brush_size = IntVar(value=15)
+        self.region_feather = IntVar(value=0)
+        self.region_mask: "Image.Image | None" = None
+        self.region_canvas_image_ref = None
+        self.region_canvas_overlay_ref = None
+        self.region_drag_start = None
+        self.region_rubber_id = None
+        self.region_poly_points: list[float] = []
+        self.region_current_output_dir: str = ""
+        self.region_workflow_running = False
+        self.region_status = StringVar(value="Ready")
+        self.region_progress = StringVar(value="")
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.refresh_processes()
@@ -1194,15 +1216,18 @@ class App:
         self.generate_tab = Frame(self.tabs)
         self.import_tab = Frame(self.tabs)
         self.export_tab = Frame(self.tabs)
+        self.region_paint_tab = Frame(self.tabs)
         self.tutorial_tab = Frame(self.tabs)
         self.tabs.add(self.generate_tab, text=tr(self.lang, "generate_tab"))
         self.tabs.add(self.import_tab, text=tr(self.lang, "import_tab"))
         self.tabs.add(self.export_tab, text=tr(self.lang, "export_tab"))
+        self.tabs.add(self.region_paint_tab, text=tr(self.lang, "region_paint_tab"))
         self.tabs.add(self.tutorial_tab, text=tr(self.lang, "tutorial_tab"))
 
         self._build_generate_tab()
         self._build_import_tab()
         self._build_export_tab()
+        self._build_region_paint_tab()
         self._build_tutorial_tab()
         self._build_log()
         self._apply_dark_theme_recursive(self.root)
@@ -1366,6 +1391,553 @@ class App:
         self.preview_label = Label(right, text=tr(self.lang, "preview_hint"), bg="#202020", fg="#dddddd", width=60, height=24)
         self.preview_label.pack(fill=BOTH, expand=True, pady=6)
         self.preview_label.bind("<Configure>", self._schedule_preview_refresh)
+
+    def _build_region_paint_tab(self):
+        """Build the Region Paint tab with image selection, budget, tools, and preview canvas."""
+        # --- Left panel (scrollable controls) ---
+        left_outer = Frame(self.region_paint_tab)
+        left_outer.pack(side=LEFT, fill=BOTH, expand=False, padx=(0, 10), pady=10)
+
+        scroll_area = Frame(left_outer)
+        scroll_area.pack(fill=BOTH, expand=True, pady=(0, 8))
+        left_canvas = Canvas(scroll_area, highlightthickness=0, width=380)
+        left_scroll = ttk.Scrollbar(scroll_area, orient="vertical", command=left_canvas.yview)
+        left_canvas.configure(yscrollcommand=left_scroll.set)
+        left_canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        left_scroll.pack(side=RIGHT, fill="y")
+        left = Frame(left_canvas)
+        left_window = left_canvas.create_window((0, 0), window=left, anchor="nw")
+
+        def _apply_region_scroll_region():
+            left_canvas.configure(scrollregion=left_canvas.bbox("all"))
+
+        def _update_region_scroll_region(_event=None):
+            left_canvas.after(LAYOUT_RESIZE_DEBOUNCE_MS, _apply_region_scroll_region)
+
+        def _match_region_canvas_width(event):
+            width = max(1, int(event.width))
+            bucket = max(1, LAYOUT_SIZE_BUCKET)
+            width = max(1, int(round(width / bucket) * bucket))
+            left_canvas.itemconfigure(left_window, width=width)
+
+        def _region_mousewheel(event):
+            left_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _bind_region_mousewheel(_event=None):
+            left_canvas.bind_all("<MouseWheel>", _region_mousewheel)
+
+        def _unbind_region_mousewheel(_event=None):
+            left_canvas.unbind_all("<MouseWheel>")
+
+        left.bind("<Configure>", _update_region_scroll_region)
+        left_canvas.bind("<Configure>", _match_region_canvas_width)
+        scroll_area.bind("<Enter>", _bind_region_mousewheel)
+        scroll_area.bind("<Leave>", _unbind_region_mousewheel)
+
+        # Step 1 — Image & Profile
+        step1 = ttk.LabelFrame(left, text=tr(self.lang, "region_step_image"))
+        self.translated.append((step1, "region_step_image", "text"))
+        step1.pack(fill=X, pady=(0, 6))
+        row = Frame(step1)
+        row.pack(fill=X, padx=10, pady=(6, 2))
+        self._label(row, "images").pack(side=LEFT)
+        self._button(row, "add_images", self.region_add_image).pack(side=RIGHT)
+        self._button(row, "remove_image", self.region_remove_image).pack(side=RIGHT, padx=8)
+        self.region_image_list = Listbox(step1, height=2)
+        self.region_image_list.pack(fill=X, padx=10, pady=(2, 4))
+        self.region_image_list.bind("<<ListboxSelect>>", self._region_on_image_select)
+        profile_row = Frame(step1)
+        profile_row.pack(fill=X, padx=10, pady=(0, 8))
+        self._label(profile_row, "quality").pack(side=LEFT)
+        self.region_profile_combo = ttk.Combobox(
+            profile_row,
+            values=[item["label"] for item in self.settings],
+            textvariable=self.region_selected_profile,
+            state="readonly",
+            width=26,
+        )
+        self.region_profile_combo.pack(side=LEFT, fill=X, expand=True, padx=(8, 0))
+        if self.settings:
+            self.region_selected_profile.set(self.settings[min(2, len(self.settings) - 1)]["label"])
+
+        # Step 2 — Budget
+        step2 = ttk.LabelFrame(left, text=tr(self.lang, "region_step_budget"))
+        self.translated.append((step2, "region_step_budget", "text"))
+        step2.pack(fill=X, pady=(0, 6))
+        budget_grid = Frame(step2)
+        budget_grid.pack(fill=X, padx=10, pady=(8, 8))
+        for ri, (key, var) in enumerate([
+            ("region_total_layers", self.region_total_var),
+            ("region_first_pass_layers", self.region_first_var),
+            ("region_region_layers", self.region_layers_var),
+        ]):
+            self._label(budget_grid, key, anchor="w").grid(row=ri, column=0, sticky="w", pady=1, padx=(0, 8))
+            Entry(budget_grid, textvariable=var, width=10).grid(row=ri, column=1, sticky="ew", pady=1)
+        rem_row = Frame(step2)
+        rem_row.pack(fill=X, padx=10, pady=(0, 8))
+        self._label(rem_row, "region_remaining").pack(side=LEFT)
+        Label(rem_row, textvariable=self.region_remaining_var, fg=Theme.ACCENT, bg=self._parent_bg(rem_row)).pack(side=LEFT, padx=6)
+
+        # Step 3 — Selection Tools
+        step3 = ttk.LabelFrame(left, text=tr(self.lang, "region_step_selection"))
+        self.translated.append((step3, "region_step_selection", "text"))
+        step3.pack(fill=X, pady=(0, 6))
+        tool_row = Frame(step3)
+        tool_row.pack(fill=X, padx=10, pady=(8, 4))
+        tools = [
+            ("region_tool_rect", "rect"),
+            ("region_tool_ellipse", "ellipse"),
+            ("region_tool_brush", "brush"),
+            ("region_tool_polygon", "polygon"),
+        ]
+        for key, value in tools:
+            btn = Button(
+                tool_row,
+                text=tr(self.lang, key),
+                command=lambda v=value: self._region_set_tool(v),
+                relief="flat", bd=1, padx=6, pady=2,
+                font=("Segoe UI", 9),
+            )
+            btn.pack(side=LEFT, padx=2)
+            self.translated.append((btn, key, "text"))
+        self._button(tool_row, "region_tool_clear", self._region_clear_mask).pack(side=LEFT, padx=(8, 2))
+        # Brush size
+        brush_row = Frame(step3)
+        brush_row.pack(fill=X, padx=10, pady=(0, 4))
+        self._label(brush_row, "region_brush_size").pack(side=LEFT)
+        ttk.Scale(brush_row, from_=5, to=50, variable=self.region_brush_size, orient="horizontal").pack(side=LEFT, fill=X, expand=True, padx=8)
+        # Feather
+        feather_row = Frame(step3)
+        feather_row.pack(fill=X, padx=10, pady=(0, 8))
+        self._label(feather_row, "region_feather").pack(side=LEFT)
+        ttk.Scale(feather_row, from_=0, to=20, variable=self.region_feather, orient="horizontal").pack(side=LEFT, fill=X, expand=True, padx=8)
+
+        # Step 4 — Actions
+        step4 = ttk.LabelFrame(left_outer, text=tr(self.lang, "region_step_actions"))
+        self.translated.append((step4, "region_step_actions", "text"))
+        step4.pack(fill=X)
+        actions = Frame(step4)
+        actions.pack(fill=X, padx=10, pady=(8, 4))
+        self.region_first_pass_btn = self._button(actions, "region_start_first_pass", self._region_start_first_pass, font=("Segoe UI", 11, "bold"), height=2)
+        self.region_first_pass_btn.pack(side=LEFT, fill=X, expand=True)
+        self.region_paint_btn = self._button(actions, "region_paint_region", self._region_start_pass, height=2, state="disabled")
+        self.region_paint_btn.pack(side=LEFT, padx=6, fill=X, expand=True)
+        self.region_stop_btn = self._button(actions, "region_stop", self._region_stop, height=2, state="disabled")
+        self.region_stop_btn.pack(side=LEFT, padx=6)
+        status_row = Frame(step4)
+        status_row.pack(fill=X, padx=10, pady=(0, 8))
+        Label(status_row, textvariable=self.region_status, fg=Theme.MUTED, bg=self._parent_bg(status_row)).pack(side=LEFT)
+        Label(status_row, textvariable=self.region_progress, fg=Theme.ACCENT, bg=self._parent_bg(status_row), font=("Segoe UI", 9)).pack(side=RIGHT)
+
+        # Pass History
+        hist = ttk.LabelFrame(left_outer, text=tr(self.lang, "region_pass_history"))
+        self.translated.append((hist, "region_pass_history", "text"))
+        hist.pack(fill=X, pady=(6, 0))
+        self.region_pass_list = Listbox(hist, height=4)
+        self.region_pass_list.pack(fill=X, padx=10, pady=(4, 8))
+
+        # --- Right panel (Canvas) ---
+        right = Frame(self.region_paint_tab)
+        right.pack(side=RIGHT, fill=BOTH, expand=True, pady=10)
+        self._label(right, "preview", anchor="w", font=("Segoe UI", 12, "bold")).pack(fill=X)
+        self.region_canvas = Canvas(right, bg=Theme.INPUT, highlightthickness=1, highlightbackground=Theme.BORDER, cursor="cross")
+        self.region_canvas.pack(fill=BOTH, expand=True, pady=6)
+
+        # Canvas bindings for selection tools
+        self.region_canvas.bind("<Button-1>", self._region_canvas_press)
+        self.region_canvas.bind("<B1-Motion>", self._region_canvas_drag)
+        self.region_canvas.bind("<ButtonRelease-1>", self._region_canvas_release)
+        self.region_canvas.bind("<Double-Button-1>", self._region_canvas_double_click)
+        self.region_canvas.bind("<Motion>", self._region_canvas_motion)
+
+        self._region_update_button_states()
+
+    # ==================================================================
+    # Region Paint — Image management
+    # ==================================================================
+
+    def region_add_image(self):
+        paths = filedialog.askopenfilenames(
+            title=tr(self.lang, "add_images"),
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp"), ("All files", "*.*")],
+        )
+        for p in paths:
+            pp = Path(p)
+            if pp.exists() and pp not in self.region_images:
+                self.region_images.append(pp)
+        self._region_refresh_image_list()
+
+    def region_remove_image(self):
+        sel = self.region_image_list.curselection()
+        if sel:
+            idx = sel[0]
+            if 0 <= idx < len(self.region_images):
+                del self.region_images[idx]
+        self._region_refresh_image_list()
+        self._region_clear_mask()
+
+    def _region_refresh_image_list(self):
+        self.region_image_list.delete(0, END)
+        for p in self.region_images:
+            self.region_image_list.insert(END, p.name)
+        self._region_update_button_states()
+
+    def _region_on_image_select(self, _event=None):
+        """Display the selected image on the canvas."""
+        sel = self.region_image_list.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if 0 <= idx < len(self.region_images):
+            self._region_display_image(self.region_images[idx])
+
+    def _region_display_image(self, image_path: Path):
+        """Load and display an image on the region canvas."""
+        try:
+            from PIL import Image, ImageTk
+            img = Image.open(image_path).convert("RGBA")
+            # Scale to fit canvas (max 600px)
+            cw = self.region_canvas.winfo_width() or 600
+            ch = self.region_canvas.winfo_height() or 500
+            display_size = min(cw - 4, ch - 4, 600)
+            ratio = display_size / max(img.width, img.height)
+            new_w = max(1, int(img.width * ratio))
+            new_h = max(1, int(img.height * ratio))
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+            self.region_canvas_image_ref = ImageTk.PhotoImage(img)
+            self.region_canvas.delete("all")
+            self.region_canvas.create_image(2, 2, anchor="nw", image=self.region_canvas_image_ref)
+            self._region_redraw_overlay()
+        except Exception as e:
+            self.log_line(f"Region Paint: failed to load image: {e}")
+
+    # ==================================================================
+    # Region Paint — Canvas mouse handlers
+    # ==================================================================
+
+    def _region_set_tool(self, tool: str):
+        self.region_tool.set(tool)
+        self.region_poly_points.clear()
+        self.region_canvas.configure(cursor="cross" if tool != "brush" else "dot")
+
+    def _region_get_canvas_scale(self) -> float:
+        """Compute scale factor: canvas-display-pixels / working-pixels."""
+        if not self.region_images:
+            return 1.0
+        sel = self.region_image_list.curselection()
+        if not sel:
+            return 1.0
+        idx = sel[0]
+        if idx >= len(self.region_images):
+            return 1.0
+        try:
+            from PIL import Image
+            img = Image.open(self.region_images[idx])
+            w, h = img.size
+            display_w = max(1, (self.region_canvas.winfo_width() or 600) - 4)
+            display_h = max(1, (self.region_canvas.winfo_height() or 500) - 4)
+            display_size = min(display_w, display_h, 600)
+            ratio = display_size / max(w, h)
+            return ratio  # canvas_pixels / working_pixels
+        except Exception:
+            return 1.0
+
+    def _region_canvas_press(self, event):
+        tool = self.region_tool.get()
+        if tool in ("rect", "ellipse"):
+            self.region_drag_start = (event.x, event.y)
+        elif tool == "brush":
+            self.region_drag_start = (event.x, event.y)
+            self.region_poly_points = [float(event.x), float(event.y)]
+        elif tool == "polygon":
+            self.region_poly_points.append(float(event.x))
+            self.region_poly_points.append(float(event.y))
+            # Draw a small dot at the vertex
+            r = 3
+            self.region_canvas.create_oval(event.x - r, event.y - r, event.x + r, event.y + r, fill="#ff4444", outline="")
+
+    def _region_canvas_drag(self, event):
+        tool = self.region_tool.get()
+        if tool == "rect":
+            if self.region_drag_start:
+                x1, y1 = self.region_drag_start
+                if self.region_rubber_id:
+                    self.region_canvas.delete(self.region_rubber_id)
+                self.region_rubber_id = self.region_canvas.create_rectangle(x1, y1, event.x, event.y, outline="#ff4444", dash=(4, 2))
+        elif tool == "ellipse":
+            if self.region_drag_start:
+                x1, y1 = self.region_drag_start
+                if self.region_rubber_id:
+                    self.region_canvas.delete(self.region_rubber_id)
+                self.region_rubber_id = self.region_canvas.create_oval(x1, y1, event.x, event.y, outline="#ff4444", dash=(4, 2))
+        elif tool == "brush":
+            self.region_poly_points.append(float(event.x))
+            self.region_poly_points.append(float(event.y))
+            # Draw brush stroke on canvas
+            r = max(1, self.region_brush_size.get() // 3)
+            self.region_canvas.create_oval(event.x - r, event.y - r, event.x + r, event.y + r, fill="#ff4444", outline="")
+
+    def _region_canvas_release(self, event):
+        tool = self.region_tool.get()
+        if tool in ("rect", "ellipse") and self.region_drag_start:
+            x1, y1 = self.region_drag_start
+            x2, y2 = event.x, event.y
+            if abs(x2 - x1) > 3 and abs(y2 - y1) > 3:
+                self.region_shapes.append({"tool": tool, "coords": [x1, y1, x2, y2]})
+            if self.region_rubber_id:
+                self.region_canvas.delete(self.region_rubber_id)
+                self.region_rubber_id = None
+            self.region_drag_start = None
+            self._region_redraw_overlay()
+        elif tool == "brush":
+            if len(self.region_poly_points) >= 4:
+                self.region_shapes.append({
+                    "tool": "brush",
+                    "coords": list(self.region_poly_points),
+                    "brush_size": self.region_brush_size.get(),
+                })
+            self.region_poly_points.clear()
+            self.region_drag_start = None
+            self._region_redraw_overlay()
+        self._region_update_button_states()
+
+    def _region_canvas_double_click(self, event):
+        tool = self.region_tool.get()
+        if tool == "polygon" and len(self.region_poly_points) >= 6:
+            self.region_shapes.append({"tool": "polygon", "coords": list(self.region_poly_points)})
+            self.region_poly_points.clear()
+            self._region_redraw_overlay()
+            self._region_update_button_states()
+
+    def _region_canvas_motion(self, _event):
+        """Cursor preview (no-op for now, could show crosshair)."""
+        pass
+
+    def _region_redraw_overlay(self):
+        """Redraw the red semi-transparent mask overlay on the canvas."""
+        try:
+            from PIL import Image, ImageDraw, ImageTk
+        except Exception:
+            return
+        if not self.region_images:
+            return
+        sel = self.region_image_list.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if idx >= len(self.region_images):
+            return
+        # Reload base image
+        img = Image.open(self.region_images[idx]).convert("RGBA")
+        cw = self.region_canvas.winfo_width() or 600
+        ch = self.region_canvas.winfo_height() or 500
+        display_size = min(cw - 4, ch - 4, 600)
+        ratio = display_size / max(img.width, img.height)
+        new_w = max(1, int(img.width * ratio))
+        new_h = max(1, int(img.height * ratio))
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+        # Draw red overlay for each shape
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        for shape in self.region_shapes:
+            tool = shape.get("tool", "")
+            coords = shape.get("coords", [])
+            if tool in ("rect", "ellipse") and len(coords) >= 4:
+                box = [int(c) for c in coords[:4]]
+                if tool == "rect":
+                    draw.rectangle(box, fill=(255, 0, 0, 80))
+                else:
+                    draw.ellipse(box, fill=(255, 0, 0, 80))
+            elif tool == "brush" and len(coords) >= 4:
+                points = [(int(coords[i]), int(coords[i + 1])) for i in range(0, len(coords) - 1, 2)]
+                bs = max(1, int(shape.get("brush_size", 15) * ratio / 3))
+                draw.line(points, fill=(255, 0, 0, 80), width=bs)
+            elif tool == "polygon" and len(coords) >= 6:
+                points = [(int(coords[i]), int(coords[i + 1])) for i in range(0, len(coords) - 1, 2)]
+                draw.polygon(points, fill=(255, 0, 0, 80))
+        img = Image.alpha_composite(img, overlay)
+        self.region_canvas_image_ref = ImageTk.PhotoImage(img)
+        self.region_canvas.delete("all")
+        self.region_canvas.create_image(2, 2, anchor="nw", image=self.region_canvas_image_ref)
+
+    def _region_clear_mask(self):
+        self.region_shapes.clear()
+        self.region_poly_points.clear()
+        self.region_drag_start = None
+        if self.region_rubber_id:
+            self.region_canvas.delete(self.region_rubber_id)
+            self.region_rubber_id = None
+        self.region_mask = None
+        if self.region_images:
+            sel = self.region_image_list.curselection()
+            if sel and sel[0] < len(self.region_images):
+                self._region_display_image(self.region_images[sel[0]])
+        self._region_update_button_states()
+
+    def _region_generate_mask(self) -> "Image.Image | None":
+        """Convert canvas shapes to a PIL 'L' mask at working resolution."""
+        if not self.region_shapes:
+            return None
+        sel = self.region_image_list.curselection()
+        if not sel:
+            return None
+        idx = sel[0]
+        if idx >= len(self.region_images):
+            return None
+        try:
+            from PIL import Image
+            img = Image.open(self.region_images[idx])
+            w, h = img.size
+            scale = self._region_get_canvas_scale()
+            from region_painter.image_processor import mask_from_canvas_shapes
+            mask = mask_from_canvas_shapes(self.region_shapes, w, h, scale)
+            feather = self.region_feather.get()
+            if feather > 0:
+                from PIL import ImageFilter
+                mask = mask.filter(ImageFilter.GaussianBlur(radius=feather))
+            return mask
+        except Exception as e:
+            self.log_line(f"Region Paint: mask generation failed: {e}")
+            return None
+
+    # ==================================================================
+    # Region Paint — Button state management
+    # ==================================================================
+
+    def _region_update_button_states(self):
+        has_image = bool(self.region_images)
+        has_shapes = bool(self.region_shapes)
+        running = self.region_workflow_running
+        self.region_first_pass_btn.config(state="normal" if has_image and not running else "disabled")
+        self.region_paint_btn.config(state="normal" if has_image and has_shapes and not running else "disabled")
+        self.region_stop_btn.config(state="normal" if running else "disabled")
+        # Update remaining
+        try:
+            total = int(self.region_total_var.get() or 0)
+            first = int(self.region_first_var.get() or 0)
+            self.region_remaining_var.set(str(total))
+        except ValueError:
+            self.region_remaining_var.set("0")
+
+    # ==================================================================
+    # Region Paint — Worker threads
+    # ==================================================================
+
+    def _region_start_first_pass(self):
+        if not self.region_images:
+            self.log_line(tr(self.lang, "region_no_image"))
+            return
+        sel = self.region_image_list.curselection()
+        if not sel:
+            self.log_line(tr(self.lang, "region_no_image"))
+            return
+        image_path = self.region_images[sel[0]]
+        profile_label = self.region_selected_profile.get()
+        setting = next((s for s in self.settings if s["label"] == profile_label), None)
+        if setting is None and self.settings:
+            setting = self.settings[0]
+        if setting is None:
+            self.log_line("No quality profile selected.")
+            return
+        try:
+            total_budget = int(self.region_total_var.get() or 2000)
+            first_layers = int(self.region_first_var.get() or 1000)
+        except ValueError:
+            self.log_line("Invalid budget values.")
+            return
+        output_dir = ROOT / "runtime" / "region-painter" / image_path.stem
+        self.region_current_output_dir = str(output_dir)
+        self.region_workflow_running = True
+        self._region_update_button_states()
+        self.region_status.set(tr(self.lang, "running"))
+        self.region_progress.set("Starting first pass...")
+        threading.Thread(
+            target=self._region_first_pass_worker,
+            args=(image_path, setting, first_layers, output_dir),
+            daemon=True,
+        ).start()
+
+    def _region_first_pass_worker(self, image_path: Path, setting, first_layers: int, output_dir: Path):
+        def on_progress(msg):
+            self.queue.put(("region_log", msg))
+            self.queue.put(("region_progress", msg))
+        try:
+            result = run_first_pass(
+                image_path=str(image_path),
+                settings_path=str(setting["path"]),
+                first_layers=first_layers,
+                output_dir=str(output_dir),
+                on_progress=on_progress,
+            )
+            self.queue.put(("region_done", result))
+        except Exception as e:
+            self.queue.put(("region_status", tr(self.lang, "failed")))
+            self.queue.put(("region_log", f"First pass error: {e}"))
+            self.queue.put(("region_done", {"ok": False, "error": str(e)}))
+
+    def _region_start_pass(self):
+        if not self.region_shapes:
+            self.log_line(tr(self.lang, "region_no_mask"))
+            return
+        mask = self._region_generate_mask()
+        if mask is None:
+            self.log_line("Failed to generate selection mask.")
+            return
+        try:
+            region_layers = int(self.region_layers_var.get() or 300)
+        except ValueError:
+            region_layers = 300
+        output_dir = Path(self.region_current_output_dir)
+        self.region_workflow_running = True
+        self._region_update_button_states()
+        self.region_status.set(tr(self.lang, "running"))
+        self.region_progress.set("Starting region pass...")
+        threading.Thread(
+            target=self._region_pass_worker,
+            args=(output_dir, region_layers, mask),
+            daemon=True,
+        ).start()
+
+    def _region_pass_worker(self, output_dir: Path, region_layers: int, mask):
+        def on_progress(msg):
+            self.queue.put(("region_log", msg))
+            self.queue.put(("region_progress", msg))
+        try:
+            result = run_region_pass(
+                output_dir=str(output_dir),
+                region_layers=region_layers,
+                selection_mask=mask,
+                on_progress=on_progress,
+            )
+            self.queue.put(("region_done", result))
+        except Exception as e:
+            self.queue.put(("region_status", tr(self.lang, "failed")))
+            self.queue.put(("region_log", f"Region pass error: {e}"))
+            self.queue.put(("region_done", {"ok": False, "error": str(e)}))
+
+    def _region_stop(self):
+        self.shutdown_event.set()
+        self.region_status.set(tr(self.lang, "stopped"))
+        self.region_workflow_running = False
+        self._region_update_button_states()
+
+    def _region_display_preview(self, preview_path: Path):
+        """Display a rendered preview image on the region canvas."""
+        try:
+            from PIL import Image, ImageTk
+            img = Image.open(preview_path).convert("RGBA")
+            cw = self.region_canvas.winfo_width() or 600
+            ch = self.region_canvas.winfo_height() or 500
+            display_size = min(cw - 4, ch - 4, 600)
+            ratio = display_size / max(img.width, img.height)
+            new_w = max(1, int(img.width * ratio))
+            new_h = max(1, int(img.height * ratio))
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+            self.region_canvas_image_ref = ImageTk.PhotoImage(img)
+            self.region_canvas.delete("all")
+            self.region_canvas.create_image(2, 2, anchor="nw", image=self.region_canvas_image_ref)
+        except Exception:
+            pass
 
     def _build_import_tab(self):
         self._build_market_banner(self.import_tab)
@@ -3424,6 +3996,48 @@ class App:
                     self.full_shape_report_button.config(state="normal")
             elif kind == "full_shape_failed_prompt":
                 self.show_full_shape_failure_prompt(payload)
+            elif kind == "region_log":
+                self.log_line(payload)
+            elif kind == "region_progress":
+                self.region_progress.set(payload)
+            elif kind == "region_status":
+                self.region_status.set(payload)
+                self.region_workflow_running = False
+                self._region_update_button_states()
+            elif kind == "region_done":
+                self.region_workflow_running = False
+                self.shutdown_event.clear()
+                result = payload or {}
+                if result.get("ok"):
+                    self.region_status.set(tr(self.lang, "done"))
+                    self.region_progress.set("")
+                    if result.get("new_total"):
+                        self.region_progress.set(f"Total layers: {result['new_total']}")
+                    # Refresh pass history
+                    if self.region_current_output_dir:
+                        try:
+                            status = region_get_status(self.region_current_output_dir)
+                            self.region_pass_list.delete(0, END)
+                            for i, p in enumerate(status.get("passes", []), 1):
+                                label = f"#{i}: {p.get('layers', 0)} layers"
+                                if p.get("mask"):
+                                    label += " (region)"
+                                else:
+                                    label += " (first pass)"
+                                self.region_pass_list.insert(END, label)
+                            self.region_remaining_var.set(str(status.get("remaining", 0)))
+                        except Exception:
+                            pass
+                    # Show preview if available
+                    preview_path = Path(self.region_current_output_dir) / "preview.png"
+                    if preview_path.exists():
+                        self._region_display_preview(preview_path)
+                else:
+                    self.region_status.set(tr(self.lang, "failed"))
+                    self.region_progress.set(result.get("error", "Unknown error"))
+                self._region_update_button_states()
+            elif kind == "region_canvas_update":
+                self._region_display_image(payload)
         if not self.closed:
             self.root.after(100, self._poll_queue)
 
