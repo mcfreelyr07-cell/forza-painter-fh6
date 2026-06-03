@@ -20,7 +20,7 @@ import zipfile
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from tkinter import BOTH, END, LEFT, RIGHT, X, Button, Canvas, Checkbutton, Entry, Frame, IntVar, Label, Listbox, PhotoImage, StringVar, Text, Tk, Toplevel, filedialog, messagebox, ttk
+from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, X, Button, Canvas, Checkbutton, Entry, Frame, IntVar, Label, Listbox, PhotoImage, StringVar, Text, Tk, Toplevel, filedialog, messagebox, ttk
 
 import psutil
 
@@ -1219,7 +1219,6 @@ class App:
         Label(process_bar, textvariable=self.status, anchor="e", bg=Theme.BG, fg=Theme.MUTED).pack(side=RIGHT)
 
         self.tabs = ttk.Notebook(self.root, style="Primary.TNotebook")
-        self.tabs.pack(fill=BOTH, expand=True, padx=14, pady=(0, 8))
         self.generate_tab = Frame(self.tabs)
         self.import_tab = Frame(self.tabs)
         self.export_tab = Frame(self.tabs)
@@ -1236,7 +1235,10 @@ class App:
         self._build_export_tab()
         self._build_region_paint_tab()
         self._build_tutorial_tab()
+        # Pack log area BEFORE Notebook so side=BOTTOM widgets claim space first
         self._build_log()
+        # Notebook fills remaining space between header/process-bar and log area
+        self.tabs.pack(fill=BOTH, expand=True, padx=14, pady=(0, 8))
         self._apply_dark_theme_recursive(self.root)
         self.tabs.bind("<<NotebookTabChanged>>", self._schedule_preview_refresh)
 
@@ -1911,9 +1913,12 @@ class App:
         output_dir = ROOT / "runtime" / "region-painter" / f"{image_path.stem}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         self.region_current_output_dir = str(output_dir)
         self.region_workflow_running = True
+        # state.json does not exist yet — show total budget as remaining
+        self.region_remaining_var.set(str(total_budget))
         self._region_update_button_states()
         self.region_status.set(tr(self.lang, "running"))
         self.region_progress.set("Starting first pass...")
+        self.log_line("Region Paint: first pass starting...")
         threading.Thread(
             target=self._region_first_pass_worker,
             args=(image_path, setting, first_layers, output_dir),
@@ -1969,6 +1974,10 @@ class App:
             reader = threading.Thread(target=_reader, daemon=True)
             reader.start()
 
+            # --- Poll for exe preview files (same pattern as _generate_worker) ---
+            last_preview_mtime = None
+            next_preview_scan = 0.0
+
             try:
                 while proc.poll() is None:
                     if self.shutdown_event.is_set():
@@ -1987,6 +1996,23 @@ class App:
                             friendly = self.friendly_generator_line(stripped)
                             if friendly:
                                 self.queue.put(("region_log", friendly))
+                    # --- Preview polling ---
+                    now = time.monotonic()
+                    if now >= next_preview_scan:
+                        next_preview_scan = now + GENERATOR_PREVIEW_SCAN_SECONDS
+                        preview_files = sorted(
+                            output_dir.glob("_exe_preview*.png"),
+                            key=lambda p: p.stat().st_mtime, reverse=True,
+                        )
+                        if preview_files:
+                            newest = preview_files[0]
+                            try:
+                                mtime = newest.stat().st_mtime
+                            except OSError:
+                                mtime = None
+                            if mtime is not None and mtime != last_preview_mtime:
+                                last_preview_mtime = mtime
+                                self.queue.put(("region_preview", str(newest)))
                     time.sleep(GENERATOR_POLL_SLEEP_SECONDS)
                 reader.join(timeout=1)
             finally:
@@ -2009,6 +2035,9 @@ class App:
             self.queue.put(("region_done", {"ok": False, "error": str(e)}))
 
     def _region_start_pass(self):
+        if self.region_workflow_running:
+            self.log_line("Region Paint: already running, ignoring duplicate request.")
+            return
         if not self.region_shapes:
             self.log_line(tr(self.lang, "region_no_mask"))
             return
@@ -2025,6 +2054,7 @@ class App:
         self._region_update_button_states()
         self.region_status.set(tr(self.lang, "running"))
         self.region_progress.set("Starting region pass...")
+        self.log_line("Region Paint: region pass starting...")
         threading.Thread(
             target=self._region_pass_worker,
             args=(output_dir, region_layers, mask),
@@ -2079,6 +2109,10 @@ class App:
             reader = threading.Thread(target=_reader, daemon=True)
             reader.start()
 
+            # --- Poll for exe preview files ---
+            last_preview_mtime = None
+            next_preview_scan = 0.0
+
             try:
                 while proc.poll() is None:
                     if self.shutdown_event.is_set():
@@ -2097,6 +2131,23 @@ class App:
                             friendly = self.friendly_generator_line(stripped)
                             if friendly:
                                 self.queue.put(("region_log", friendly))
+                    # --- Preview polling ---
+                    now = time.monotonic()
+                    if now >= next_preview_scan:
+                        next_preview_scan = now + GENERATOR_PREVIEW_SCAN_SECONDS
+                        preview_files = sorted(
+                            output_dir.glob("_exe_preview*.png"),
+                            key=lambda p: p.stat().st_mtime, reverse=True,
+                        )
+                        if preview_files:
+                            newest = preview_files[0]
+                            try:
+                                mtime = newest.stat().st_mtime
+                            except OSError:
+                                mtime = None
+                            if mtime is not None and mtime != last_preview_mtime:
+                                last_preview_mtime = mtime
+                                self.queue.put(("region_preview", str(newest)))
                     time.sleep(GENERATOR_POLL_SLEEP_SECONDS)
                 reader.join(timeout=1)
             finally:
@@ -2281,16 +2332,16 @@ class App:
         self._update_tutorial()
 
     def _build_log(self):
+        self.log = Text(self.root, height=9)
+        self.log.pack(side=BOTTOM, fill=BOTH, padx=14, pady=(0, 12))
         row = Frame(self.root)
-        row.pack(fill=X, padx=14)
+        row.pack(side=BOTTOM, fill=X, padx=14)
         self._label(row, "logs", anchor="w").pack(side=LEFT)
         self._button(row, "export_logs", self.export_detailed_log).pack(side=RIGHT)
         self.full_shape_report_button = self._button(row, "export_full_shape_report", self.export_full_shape_report, state="disabled")
         self.full_shape_report_button.pack(side=RIGHT, padx=(0, 8))
         self._label(row, "progress", anchor="e").pack(side=LEFT, padx=(18, 4))
         Label(row, textvariable=self.progress_text, anchor="w", fg="#005a9e").pack(side=LEFT, fill=X, expand=True)
-        self.log = Text(self.root, height=9)
-        self.log.pack(fill=BOTH, padx=14, pady=(0, 12))
 
     def _field(self, parent, key, variable, row, values=None, readonly=False):
         self._label(parent, key, anchor="w").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=5)
@@ -4205,6 +4256,12 @@ class App:
                 self.log_line(payload)
             elif kind == "region_progress":
                 self.region_progress.set(payload)
+            elif kind == "region_preview":
+                # Live preview from exe during generation
+                try:
+                    self._region_display_preview(Path(payload))
+                except Exception:
+                    pass
             elif kind == "region_status":
                 self.region_status.set(payload)
                 self.region_workflow_running = False
@@ -4241,6 +4298,8 @@ class App:
                         preview_path = Path(preview_path)
                     if preview_path.exists():
                         self._region_display_preview(preview_path)
+                    # Auto-clear mask after a successful region pass
+                    self._region_clear_mask()
                 else:
                     self.region_status.set(tr(self.lang, "failed"))
                     self.region_progress.set(result.get("error", "Unknown error"))

@@ -86,6 +86,7 @@ def finalize_first_pass(prep):
         shutil.copy2(actual_json, base_json)
     shapes = load_shapes_from_json(base_json)
     layers = max(0, len(shapes) - 1)
+    # cv2 renderer (built-in exe-preview fallback)
     try:
         render_preview(target_png, shapes, preview_png, max_preview_size)
     except Exception:
@@ -111,6 +112,7 @@ def prepare_region_pass(
         region_layers = state.remaining_budget
     if region_layers <= 0:
         return {"error": "No remaining budget for region pass."}
+    # stopAt must be > len(shapes) for -resume to work (exe validates this).
     new_stop_at = state.used_layers + region_layers
     target_png = Path(state.target_path)
     pass_n = len(state.passes) + 1
@@ -125,7 +127,20 @@ def prepare_region_pass(
     temp_ini = output_dir / "temp.ini"
     if not settings_path.exists():
         return {"error": f"Original settings INI not found: {settings_path}"}
-    modify_ini(settings_path, temp_ini, stop_at=new_stop_at)
+    # Filter saveAt to only include values >= used_layers so the exe
+    # does not emit spurious checkpoints during occlusion-culling
+    # compaction (where the shape count temporarily drops).
+    settings_values = parse_settings(settings_path)
+    orig_save_at_str = settings_values.get("saveAt", "")
+    orig_save_at = []
+    for p in orig_save_at_str.split(","):
+        try:
+            orig_save_at.append(int(p.strip()))
+        except ValueError:
+            pass
+    used = state.used_layers
+    filtered_save_at = [v for v in orig_save_at if v >= used]
+    modify_ini(settings_path, temp_ini, stop_at=new_stop_at, save_at=filtered_save_at)
     base_json = Path(state.base_json)
     # Back up the accumulated shapes before the exe runs (exe may overwrite base_json).
     backup_json = output_dir / "_base_backup.json"
@@ -151,12 +166,11 @@ def prepare_region_pass(
 def finalize_region_pass(prep):
     """Post-process after region-pass exe finishes.
 
-    The exe with ``-resume`` may only output *new* shapes (not accumulated).
-    We load the old shapes from the backup made before the exe ran,
-    find the exe's new output, merge them, and write to base_json.
+    Without ``-output`` the exe writes accumulated shapes (old + new)
+    to a JSON named after the input image.  We use that output directly
+    — no merge with the backup is needed.
     """
     import json
-    import shutil
 
     state = prep["state"]
     output_dir = Path(prep["output_dir"])
@@ -167,59 +181,45 @@ def finalize_region_pass(prep):
     mask_png = prep.get("mask_png", "")
     max_preview_size = prep.get("max_preview_size", 500)
     region_target_stem = prep.get("region_target_stem", "")
+    region_layers = prep.get("region_layers", 0)
 
-    # Load OLD accumulated shapes from the backup (before exe ran).
-    old_shapes: list[dict] = []
-    if backup_json.exists():
-        try:
-            old_shapes = load_shapes_from_json(backup_json)
-        except Exception:
-            pass
+    # Count old shapes from backup for accurate new_layers calculation.
+    old_shapes = load_shapes_from_json(backup_json) if backup_json.exists() else []
+    old_type16 = sum(1 for s in old_shapes if s.get("type") == 16)
 
-    # Find the exe's NEW output (named after the region target).
-    new_shapes: list[dict] = []
+    # Find the exe's output (accumulated shapes: old + new).
+    accumulated: list[dict] = []
     if region_target_stem:
-        candidates = sorted(
+        for c in sorted(
             output_dir.glob(f"{region_target_stem}*.json"),
             key=lambda p: p.stat().st_mtime, reverse=True,
-        )
-        # Also check if base_json was updated (exe might write back to it).
-        if base_json.exists() and base_json.stat().st_mtime > backup_json.stat().st_mtime:
-            candidates.insert(0, base_json)
-        # Deduplicate and pick the first valid one.
-        seen = set()
-        for c in candidates:
-            if c.resolve() not in seen and c.exists() and c != backup_json:
-                seen.add(c.resolve())
-                try:
-                    new_shapes = load_shapes_from_json(c)
-                    break
-                except Exception:
-                    pass
+        ):
+            if c == backup_json:
+                continue
+            try:
+                accumulated = load_shapes_from_json(c)
+                break
+            except Exception:
+                pass
 
-    # Merge: old accumulated shapes + new shapes.
-    old_ellipse_count = sum(1 for s in old_shapes if s.get("type") == 16)
+    if not accumulated:
+        accumulated = old_shapes  # fallback
 
-    if new_shapes:
-        # Skip background shape in new shapes if present.
-        start = 1 if (new_shapes and new_shapes[0].get("type") == 1) else 0
-        merged = old_shapes + new_shapes[start:]
-    else:
-        # Exe didn't produce new output — keep old shapes.
-        merged = old_shapes
+    # Exe output already has all shapes — use it directly.
+    new_type16 = sum(1 for s in accumulated if s.get("type") == 16)
+    new_layers = max(0, new_type16 - old_type16)
+    if new_layers == 0:
+        new_layers = region_layers  # safety floor
 
-    merged_ellipse_count = sum(1 for s in merged if s.get("type") == 16)
-    new_layers = max(0, merged_ellipse_count - state.used_layers)
-
-    # Save merged result to base_json.
+    # Save accumulated result.
     base_json.write_text(
-        json.dumps({"shapes": merged}, indent=2, ensure_ascii=False),
+        json.dumps({"shapes": accumulated}, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
 
-    # Render preview from merged shapes.
+    # Render preview — cv2 renderer (built-in exe-preview fallback)
     try:
-        render_preview(target_png, merged, preview_png, max_preview_size)
+        render_preview(target_png, accumulated, preview_png, max_preview_size)
     except Exception:
         pass
 
@@ -231,7 +231,7 @@ def finalize_region_pass(prep):
     except OSError:
         pass
 
-    return {"ok": True, "new_total": merged_ellipse_count, "preview_png": str(preview_png)}
+    return {"ok": True, "new_total": new_type16, "preview_png": str(preview_png)}
 
 
 def get_status(output_dir):

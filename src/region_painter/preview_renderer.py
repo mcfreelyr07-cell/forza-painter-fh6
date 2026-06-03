@@ -1,18 +1,58 @@
-"""Pure Pillow CPU preview renderer for geometry JSON.
+"""cv2-based preview renderer for geometry JSON.
 
-Renders rotated-ellipse geometry onto a target image using the formula
-documented in the region-focused-painting spec (§7).  No GPU or exe
-dependency — used after each region pass because the exe's own preview
-is based on the masked target and is unsuitable for display.
+Renders rotated-ellipse geometry using OpenCV, matching the proven
+approach in ``main.py``.  Much faster than Pillow pixel iteration and
+produces anti-aliased output that matches the exe's rendering.
 """
 
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 
-from PIL import Image
+from utils import load_cv2
+
+# Keep the exe-preview helper for fallback scenarios.
+_EXE_PREVIEW_GLOB = "_exe_preview.*.png"
+
+
+def _copy_exe_preview(
+    output_dir: str | Path,
+    preview_png: str | Path,
+    max_preview_size: int = 500,
+) -> bool:
+    """Copy the exe's last checkpoint preview to *preview_png*.
+
+    Returns ``True`` if a preview was copied, ``False`` otherwise.
+    """
+    import shutil
+
+    output_dir = Path(output_dir)
+    preview_png = Path(preview_png)
+    previews = sorted(
+        output_dir.glob(_EXE_PREVIEW_GLOB),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not previews:
+        return False
+    shutil.copy2(previews[0], preview_png)
+    # Optionally resize.
+    try:
+        from PIL import Image
+
+        img = Image.open(preview_png)
+        w, h = img.size
+        if max(w, h) > max_preview_size:
+            ratio = max_preview_size / max(w, h)
+            img = img.resize(
+                (max(1, int(w * ratio)), max(1, int(h * ratio))),
+                Image.LANCZOS,
+            )
+            img.save(preview_png, "PNG")
+    except Exception:
+        pass
+    return True
 
 
 def render_preview(
@@ -21,86 +61,114 @@ def render_preview(
     output_path: str | Path,
     max_preview_size: int = 500,
 ) -> None:
-    """Render *shapes* onto *target_path* and save to *output_path*.
+    """Render *shapes* and save to *output_path* using OpenCV.
 
-    1. Load *target_path* as the RGBA canvas base.
-    2. Skip ``shapes[0]`` (the type-1 background rectangle).
-    3. For each type-16 rotated ellipse, alpha-blend onto the canvas.
-    4. Resize to fit *max_preview_size* (maintaining aspect ratio) and
-       save as PNG.
+    Matches the rendering approach in ``main.py`` load_geometry():
+    background rectangle (type-1, shapes[0]) first, then filled
+    rotated ellipses (type-16) drawn in BGR colour order.
+
+    Falls back to copying the exe's own preview if cv2 is unavailable.
     """
     target_path = Path(target_path)
     output_path = Path(output_path)
 
-    canvas = Image.open(target_path).convert("RGBA")
-    w, h = canvas.size
-    pixels = canvas.load()
+    loaded = load_cv2()
+    if not loaded:
+        # cv2 not available — try exe preview in parent dir
+        _copy_exe_preview(output_path.parent, output_path, max_preview_size)
+        return
 
+    cv2, np = loaded
+
+    # --- Determine canvas size from shapes[0] (background rect) ---
+    if not shapes:
+        return
+    bg_data = shapes[0].get("data", [])
+    bg_color = shapes[0].get("color", [0, 0, 0, 255])
+    if len(bg_data) >= 4:
+        image_w = int(bg_data[2])
+        image_h = int(bg_data[3])
+    else:
+        # Fallback: load target image for dimensions.
+        img = cv2.imread(str(target_path), cv2.IMREAD_COLOR)
+        if img is None:
+            return
+        image_h, image_w = img.shape[:2]
+
+    # --- Create canvas ---
+    canvas = np.zeros((image_h, image_w, 3), np.uint8)
+
+    bg_r, bg_g, bg_b, bg_a = bg_color[:4] if len(bg_color) >= 4 else (0, 0, 0, 255)
+    if bg_a > 0:
+        cv2.rectangle(
+            canvas, (0, 0), (image_w, image_h),
+            (bg_b, bg_g, bg_r), thickness=-1,
+        )
+    else:
+        canvas[:, :] = (38, 38, 38)  # dark gray fallback
+
+    # --- Draw shapes on top (with alpha blending for semi-transparent shapes) ---
+    temp = np.zeros_like(canvas)  # reusable buffer for alpha-blended shapes
     for shape in shapes[1:]:
         shape_type = shape.get("type", 0)
-        if shape_type != 16:
-            continue
-
-        data = shape.get("data", [])
         color = shape.get("color", [0, 0, 0, 255])
-        if len(data) < 5 or len(color) < 4:
+        if len(color) < 4:
             continue
-        if color[3] <= 0:
-            continue
-
-        x, y, rx, ry, theta_deg = data[:5]
         r, g, b, a = color[:4]
-
-        if rx <= 0 or ry <= 0:
+        if a <= 0:
             continue
 
-        # Pre-compute rotation constants.
-        theta = math.radians(theta_deg)
-        cos_t = math.cos(theta)
-        sin_t = math.sin(theta)
-        inv_rx2 = 1.0 / (rx * rx)
-        inv_ry2 = 1.0 / (ry * ry)
+        bgr = (b, g, r)
+        alpha_factor = a / 255.0  # float [0, 1]
 
-        # Alpha as float [0, 1].
-        alpha = a / 255.0
+        if shape_type == 16:  # rotated ellipse
+            data = shape.get("data", [])
+            if len(data) < 5:
+                continue
+            x, y, w, h, rot_deg = data[:5]
+            if w <= 0 or h <= 0:
+                continue
+            cx, cy = int(x), int(y)
+            axes = (int(h), int(w))  # cv2: (height, width) semi-axes
+            angle = -90 + rot_deg
 
-        # Bounding box in pixel space.
-        rx_int = int(math.ceil(rx)) + 1
-        ry_int = int(math.ceil(ry)) + 1
-        x0 = max(0, int(x) - rx_int)
-        y0 = max(0, int(y) - ry_int)
-        x1 = min(w, int(x) + rx_int + 1)
-        y1 = min(h, int(y) + ry_int + 1)
+            if a >= 255:
+                cv2.ellipse(canvas, (cx, cy), axes, angle, 0.0, 360, bgr, thickness=-1)
+            else:
+                temp.fill(0)
+                cv2.ellipse(temp, (cx, cy), axes, angle, 0.0, 360, (255, 255, 255), thickness=-1)
+                mask = (temp[:, :, 0] > 0).astype(np.float32) * alpha_factor
+                for c in range(3):
+                    canvas[:, :, c] = (canvas[:, :, c] * (1.0 - mask) + bgr[c] * mask).astype(np.uint8)
 
-        for py in range(y0, y1):
-            for px in range(x0, x1):
-                dx = (px + 0.5) - x
-                dy = (py + 0.5) - y
-                xr = dx * cos_t + dy * sin_t
-                yr = -dx * sin_t + dy * cos_t
+        elif shape_type == 1:  # rectangle (non-background)
+            data = shape.get("data", [])
+            if len(data) < 4:
+                continue
+            x, y, w, h = data[:4]
+            x0 = int(round(x - w / 2))
+            y0 = int(round(y - h / 2))
+            x1 = int(round(x + w / 2))
+            y1 = int(round(y + h / 2))
 
-                if xr * xr * inv_rx2 + yr * yr * inv_ry2 <= 1.0:
-                    pr, pg, pb, pa = pixels[px, py]
-                    pa_f = pa / 255.0
-                    blend = alpha * (1.0 - pa_f) + pa_f
-                    if blend <= 0:
-                        continue
-                    out_r = int((r * alpha + pr * pa_f * (1.0 - alpha)) / blend)
-                    out_g = int((g * alpha + pg * pa_f * (1.0 - alpha)) / blend)
-                    out_b = int((b * alpha + pb * pa_f * (1.0 - alpha)) / blend)
-                    out_a = int(blend * 255)
-                    pixels[px, py] = (min(255, out_r), min(255, out_g), min(255, out_b), min(255, out_a))
+            if a >= 255:
+                cv2.rectangle(canvas, (x0, y0), (x1, y1), bgr, thickness=-1)
+            else:
+                temp.fill(0)
+                cv2.rectangle(temp, (x0, y0), (x1, y1), (255, 255, 255), thickness=-1)
+                mask = (temp[:, :, 0] > 0).astype(np.float32) * alpha_factor
+                for c in range(3):
+                    canvas[:, :, c] = (canvas[:, :, c] * (1.0 - mask) + bgr[c] * mask).astype(np.uint8)
 
-    # Resize.
-    if max(w, h) > max_preview_size:
-        ratio = max_preview_size / max(w, h)
-        new_w = max(1, int(w * ratio))
-        new_h = max(1, int(h * ratio))
-        canvas = canvas.resize((new_w, new_h), Image.LANCZOS)
+    # --- Resize ---
+    if max(image_w, image_h) > max_preview_size:
+        ratio = max_preview_size / max(image_w, image_h)
+        new_w = max(1, int(image_w * ratio))
+        new_h = max(1, int(image_h * ratio))
+        canvas = cv2.resize(canvas, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
 
-    output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    canvas.save(output_path, "PNG")
+    cv2.imwrite(str(output_path), canvas)
 
 
 def load_shapes_from_json(json_path: str | Path) -> list[dict]:
