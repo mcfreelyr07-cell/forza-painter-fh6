@@ -180,8 +180,13 @@ def render_preview(
         new_h = max(1, int(image_h * ratio))
         canvas = cv2.resize(canvas, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
 
+    # Build RGBA: R,G,B from canvas (BGR→RGB), alpha=255 where non-black.
+    alpha = np.where(canvas.max(axis=2) > 0, 255, 0).astype(np.uint8)
+    rgba = np.dstack([canvas[:, :, 2], canvas[:, :, 1], canvas[:, :, 0], alpha])
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(output_path), canvas)
+    from PIL import Image as PILImage
+    PILImage.fromarray(rgba, "RGBA").save(str(output_path), "PNG")
 
 
 def load_shapes_from_json(json_path: str | Path) -> list[dict]:

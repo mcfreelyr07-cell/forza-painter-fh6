@@ -20,7 +20,7 @@ import zipfile
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, X, Button, Canvas, Checkbutton, Entry, Frame, IntVar, Label, Listbox, PhotoImage, StringVar, Text, Tk, Toplevel, filedialog, messagebox, ttk
+from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, X, Button, Canvas, Checkbutton, Entry, Frame, IntVar, Label, Listbox, PhotoImage, Spinbox, StringVar, Text, Tk, Toplevel, filedialog, messagebox, ttk
 
 import psutil
 
@@ -883,6 +883,8 @@ class App:
         self.region_mask: "Image.Image | None" = None
         self.region_canvas_image_ref = None
         self.region_canvas_overlay_ref = None
+        self._region_cached_pil = None       # cached full-res PIL image
+        self._region_cached_pil_path = None  # path the cached image is for
         self.region_drag_start = None
         self.region_rubber_id = None
         self.region_poly_points: list[float] = []
@@ -1499,8 +1501,6 @@ class App:
         tools = [
             ("region_tool_rect", "rect"),
             ("region_tool_ellipse", "ellipse"),
-            ("region_tool_brush", "brush"),
-            ("region_tool_polygon", "polygon"),
         ]
         for key, value in tools:
             btn = Button(
@@ -1513,16 +1513,11 @@ class App:
             btn.pack(side=LEFT, padx=2)
             self.translated.append((btn, key, "text"))
         self._button(tool_row, "region_tool_clear", self._region_clear_mask).pack(side=LEFT, padx=(8, 2))
-        # Brush size
-        brush_row = Frame(step3)
-        brush_row.pack(fill=X, padx=10, pady=(0, 4))
-        self._label(brush_row, "region_brush_size").pack(side=LEFT)
-        ttk.Scale(brush_row, from_=5, to=50, variable=self.region_brush_size, orient="horizontal").pack(side=LEFT, fill=X, expand=True, padx=8)
         # Feather
         feather_row = Frame(step3)
         feather_row.pack(fill=X, padx=10, pady=(0, 8))
         self._label(feather_row, "region_feather").pack(side=LEFT)
-        ttk.Scale(feather_row, from_=0, to=20, variable=self.region_feather, orient="horizontal").pack(side=LEFT, fill=X, expand=True, padx=8)
+        Spinbox(feather_row, from_=0, to=50, increment=1, width=5, textvariable=self.region_feather).pack(side=LEFT, padx=8)
 
         # Step 4 — Actions
         step4 = ttk.LabelFrame(left_outer, text=tr(self.lang, "region_step_actions"))
@@ -1551,9 +1546,20 @@ class App:
         # --- Right panel (Canvas) ---
         right = Frame(self.region_paint_tab)
         right.pack(side=RIGHT, fill=BOTH, expand=True, pady=10)
-        self._label(right, "preview", anchor="w", font=("Segoe UI", 12, "bold")).pack(fill=X)
-        self.region_canvas = Canvas(right, bg=Theme.INPUT, highlightthickness=1, highlightbackground=Theme.BORDER, cursor="cross")
-        self.region_canvas.pack(fill=BOTH, expand=True, pady=6)
+        # Labels above canvases
+        canvas_label_row = Frame(right)
+        canvas_label_row.pack(fill=X)
+        self._label(canvas_label_row, "region_original_label", anchor="w").pack(side=LEFT, expand=True, fill=X)
+        self._label(canvas_label_row, "region_preview_label", anchor="w").pack(side=LEFT, expand=True, fill=X)
+        # Canvases side by side
+        canvas_row = Frame(right)
+        canvas_row.pack(fill=BOTH, expand=True, pady=6)
+        self.region_canvas_left = Canvas(canvas_row, bg=Theme.INPUT, highlightthickness=1, highlightbackground=Theme.BORDER, cursor="cross")
+        self.region_canvas_left.pack(side=LEFT, fill=BOTH, expand=True)
+        self.region_canvas_right = Canvas(canvas_row, bg=Theme.INPUT, highlightthickness=1, highlightbackground=Theme.BORDER)
+        self.region_canvas_right.pack(side=LEFT, fill=BOTH, expand=True)
+        # Backwards compatibility alias — selection tools use left canvas
+        self.region_canvas = self.region_canvas_left
 
         # Canvas bindings for selection tools
         self.region_canvas.bind("<Button-1>", self._region_canvas_press)
@@ -1570,23 +1576,22 @@ class App:
     # ==================================================================
 
     def _region_canvas_configure(self, _event=None):
-        """Redraw the image when the canvas resizes."""
+        """Redraw the image/preview when canvases resize."""
         if self.region_workflow_running:
             return
-        # If a preview is currently showing, redisplay that instead
         preview = getattr(self, "_region_preview_showing", None)
         if preview and Path(preview).exists():
             if getattr(self, "_region_configure_job", None):
-                self.region_canvas.after_cancel(self._region_configure_job)
-            self._region_configure_job = self.region_canvas.after(
+                self.region_canvas_left.after_cancel(self._region_configure_job)
+            self._region_configure_job = self.region_canvas_left.after(
                 200, lambda: self._region_display_preview(Path(preview))
             )
             return
         sel = self.region_image_list.curselection()
         if sel and sel[0] < len(self.region_images):
             if getattr(self, "_region_configure_job", None):
-                self.region_canvas.after_cancel(self._region_configure_job)
-            self._region_configure_job = self.region_canvas.after(
+                self.region_canvas_left.after_cancel(self._region_configure_job)
+            self._region_configure_job = self.region_canvas_left.after(
                 200, lambda: self._region_display_image(self.region_images[sel[0]])
             )
 
@@ -1638,21 +1643,24 @@ class App:
             self._region_display_image(self.region_images[idx])
 
     def _region_display_image(self, image_path: Path):
-        """Load and display an image on the region canvas."""
+        """Load and display an image on the LEFT region canvas."""
         try:
             from PIL import Image, ImageTk
-            img = Image.open(image_path).convert("RGBA")
-            # Scale to fit canvas (max 600px)
-            cw = self.region_canvas.winfo_width() or 600
-            ch = self.region_canvas.winfo_height() or 500
+            # Cache the full-res image so redraws avoid disk I/O.
+            if self._region_cached_pil is None or self._region_cached_pil_path != image_path:
+                self._region_cached_pil = Image.open(image_path).convert("RGBA")
+                self._region_cached_pil_path = image_path
+            img = self._region_cached_pil.copy()
+            cw = self.region_canvas_left.winfo_width() or 300
+            ch = self.region_canvas_left.winfo_height() or 500
             display_size = min(cw - 4, ch - 4, 600)
             ratio = display_size / max(img.width, img.height)
             new_w = max(1, int(img.width * ratio))
             new_h = max(1, int(img.height * ratio))
             img = img.resize((new_w, new_h), Image.LANCZOS)
             self.region_canvas_image_ref = ImageTk.PhotoImage(img)
-            self.region_canvas.delete("all")
-            self.region_canvas.create_image(2, 2, anchor="nw", image=self.region_canvas_image_ref)
+            self.region_canvas_left.delete("all")
+            self.region_canvas_left.create_image(2, 2, anchor="nw", image=self.region_canvas_image_ref)
             self._region_redraw_overlay()
         except Exception as e:
             self.log_line(f"Region Paint: failed to load image: {e}")
@@ -1663,8 +1671,7 @@ class App:
 
     def _region_set_tool(self, tool: str):
         self.region_tool.set(tool)
-        self.region_poly_points.clear()
-        self.region_canvas.configure(cursor="cross" if tool != "brush" else "dot")
+        self.region_canvas.configure(cursor="cross")
 
     def _region_get_canvas_scale(self) -> float:
         """Compute scale factor: canvas-display-pixels / working-pixels."""
@@ -1677,9 +1684,12 @@ class App:
         if idx >= len(self.region_images):
             return 1.0
         try:
-            from PIL import Image
-            img = Image.open(self.region_images[idx])
-            w, h = img.size
+            if self._region_cached_pil is not None:
+                w, h = self._region_cached_pil.size
+            else:
+                from PIL import Image
+                img = Image.open(self.region_images[idx])
+                w, h = img.size
             display_w = max(1, (self.region_canvas.winfo_width() or 600) - 4)
             display_h = max(1, (self.region_canvas.winfo_height() or 500) - 4)
             display_size = min(display_w, display_h, 600)
@@ -1692,15 +1702,6 @@ class App:
         tool = self.region_tool.get()
         if tool in ("rect", "ellipse"):
             self.region_drag_start = (event.x, event.y)
-        elif tool == "brush":
-            self.region_drag_start = (event.x, event.y)
-            self.region_poly_points = [float(event.x), float(event.y)]
-        elif tool == "polygon":
-            self.region_poly_points.append(float(event.x))
-            self.region_poly_points.append(float(event.y))
-            # Draw a small dot at the vertex
-            r = 3
-            self.region_canvas.create_oval(event.x - r, event.y - r, event.x + r, event.y + r, fill="#ff4444", outline="")
 
     def _region_canvas_drag(self, event):
         tool = self.region_tool.get()
@@ -1716,12 +1717,6 @@ class App:
                 if self.region_rubber_id:
                     self.region_canvas.delete(self.region_rubber_id)
                 self.region_rubber_id = self.region_canvas.create_oval(x1, y1, event.x, event.y, outline="#ff4444", dash=(4, 2))
-        elif tool == "brush":
-            self.region_poly_points.append(float(event.x))
-            self.region_poly_points.append(float(event.y))
-            # Draw brush stroke on canvas
-            r = max(1, self.region_brush_size.get() // 3)
-            self.region_canvas.create_oval(event.x - r, event.y - r, event.x + r, event.y + r, fill="#ff4444", outline="")
 
     def _region_canvas_release(self, event):
         tool = self.region_tool.get()
@@ -1735,25 +1730,10 @@ class App:
                 self.region_rubber_id = None
             self.region_drag_start = None
             self._region_redraw_overlay()
-        elif tool == "brush":
-            if len(self.region_poly_points) >= 4:
-                self.region_shapes.append({
-                    "tool": "brush",
-                    "coords": list(self.region_poly_points),
-                    "brush_size": self.region_brush_size.get(),
-                })
-            self.region_poly_points.clear()
-            self.region_drag_start = None
-            self._region_redraw_overlay()
         self._region_update_button_states()
 
     def _region_canvas_double_click(self, event):
-        tool = self.region_tool.get()
-        if tool == "polygon" and len(self.region_poly_points) >= 6:
-            self.region_shapes.append({"tool": "polygon", "coords": list(self.region_poly_points)})
-            self.region_poly_points.clear()
-            self._region_redraw_overlay()
-            self._region_update_button_states()
+        pass  # no-op (polygon removed)
 
     def _region_canvas_motion(self, _event):
         """Cursor preview (no-op for now, could show crosshair)."""
@@ -1773,8 +1753,11 @@ class App:
         idx = sel[0]
         if idx >= len(self.region_images):
             return
-        # Reload base image
-        img = Image.open(self.region_images[idx]).convert("RGBA")
+        # Use cached full-res image to avoid disk I/O.
+        if self._region_cached_pil is None or self._region_cached_pil_path != self.region_images[idx]:
+            self._region_cached_pil = Image.open(self.region_images[idx]).convert("RGBA")
+            self._region_cached_pil_path = self.region_images[idx]
+        img = self._region_cached_pil.copy()
         cw = self.region_canvas.winfo_width() or 600
         ch = self.region_canvas.winfo_height() or 500
         display_size = min(cw - 4, ch - 4, 600)
@@ -1789,18 +1772,13 @@ class App:
             tool = shape.get("tool", "")
             coords = shape.get("coords", [])
             if tool in ("rect", "ellipse") and len(coords) >= 4:
-                box = [int(c) for c in coords[:4]]
+                x1, y1, x2, y2 = [int(c) for c in coords[:4]]
+                x1, x2 = sorted([x1, x2])
+                y1, y2 = sorted([y1, y2])
                 if tool == "rect":
-                    draw.rectangle(box, fill=(255, 0, 0, 80))
+                    draw.rectangle([x1, y1, x2, y2], fill=(255, 0, 0, 80))
                 else:
-                    draw.ellipse(box, fill=(255, 0, 0, 80))
-            elif tool == "brush" and len(coords) >= 4:
-                points = [(int(coords[i]), int(coords[i + 1])) for i in range(0, len(coords) - 1, 2)]
-                bs = max(1, int(shape.get("brush_size", 15) * ratio / 3))
-                draw.line(points, fill=(255, 0, 0, 80), width=bs)
-            elif tool == "polygon" and len(coords) >= 6:
-                points = [(int(coords[i]), int(coords[i + 1])) for i in range(0, len(coords) - 1, 2)]
-                draw.polygon(points, fill=(255, 0, 0, 80))
+                    draw.ellipse([x1, y1, x2, y2], fill=(255, 0, 0, 80))
         img = Image.alpha_composite(img, overlay)
         self.region_canvas_image_ref = ImageTk.PhotoImage(img)
         self.region_canvas.delete("all")
@@ -2176,21 +2154,20 @@ class App:
         self._region_update_button_states()
 
     def _region_display_preview(self, preview_path: Path):
-        """Display a rendered preview image on the region canvas."""
+        """Display a rendered preview image on the RIGHT region canvas."""
         try:
             from PIL import Image, ImageTk
             img = Image.open(preview_path).convert("RGBA")
-            cw = self.region_canvas.winfo_width() or 600
-            ch = self.region_canvas.winfo_height() or 500
+            cw = self.region_canvas_right.winfo_width() or 300
+            ch = self.region_canvas_right.winfo_height() or 500
             display_size = min(cw - 4, ch - 4, 600)
             ratio = display_size / max(img.width, img.height)
             new_w = max(1, int(img.width * ratio))
             new_h = max(1, int(img.height * ratio))
             img = img.resize((new_w, new_h), Image.LANCZOS)
-            self.region_canvas_image_ref = ImageTk.PhotoImage(img)
-            self.region_canvas.delete("all")
-            self.region_canvas.create_image(2, 2, anchor="nw", image=self.region_canvas_image_ref)
-            # Remember that a preview is showing (for Configure redraw)
+            self.region_preview_ref = ImageTk.PhotoImage(img)
+            self.region_canvas_right.delete("all")
+            self.region_canvas_right.create_image(2, 2, anchor="nw", image=self.region_preview_ref)
             self._region_preview_showing = str(preview_path)
         except Exception:
             pass
