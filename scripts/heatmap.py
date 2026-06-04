@@ -82,11 +82,11 @@ def build_accumulator(shapes, image_w, image_h, cv2, np):
 
 
 def render_preview(shapes, image_w, image_h, cv2, np):
-    """Replicate the preview rendering from main.py (lines 218-248).
+    """Render the geometry preview.
 
-    Uses the exact same OpenCV draw calls and BGR colour order so the
-    preview in the comparison / overlay images is pixel-identical to what
-    main.py would generate.
+    Uses the same OpenCV draw-call conventions (centre positions, ellipse
+    axis / angle order) as main.py, but properly alpha-blends
+    semi-transparent shapes instead of discarding the alpha channel.
     """
     preview = np.zeros((image_h, image_w, 3), dtype=np.uint8)
 
@@ -106,29 +106,42 @@ def render_preview(shapes, image_w, image_h, cv2, np):
         color = shape.get("color", [])
         if len(color) == 4 and int(color[3]) <= 0:
             continue
-        r, g, b, _a = [int(c) for c in color]
+        r, g, b, a = [int(c) for c in color]
         shape_type = int(shape["type"])
         data = shape["data"]
 
+        # Draw the shape filled on a temporary single-channel mask.
+        mask = np.zeros((image_h, image_w), dtype=np.uint8)
         if shape_type == 1:  # RECTANGLE
             x, y, w, h = data
             x0 = int(round(x - w / 2))
             y0 = int(round(y - h / 2))
             x1 = int(round(x + w / 2))
             y1 = int(round(y + h / 2))
-            cv2.rectangle(preview, (x0, y0), (x1, y1), (b, g, r), thickness=-1)
+            cv2.rectangle(mask, (x0, y0), (x1, y1), 1, thickness=-1)
         elif shape_type == 16:  # ROTATED_ELLIPSE
             x, y, w, h, rot_deg = data
             cv2.ellipse(
-                preview,
+                mask,
                 (int(x), int(y)),
                 (int(h), int(w)),
                 -90 + rot_deg,
                 0.0,
                 360.0,
-                (b, g, r),
+                1,
                 thickness=-1,
             )
+
+        # Blend the shape onto the preview using its alpha channel.
+        where = mask > 0
+        if a >= 255:
+            preview[where] = (b, g, r)
+        else:
+            alpha_norm = a / 255.0
+            preview[where] = (
+                (1 - alpha_norm) * preview[where].astype(np.float32)
+                + alpha_norm * np.array([b, g, r], dtype=np.float32)
+            ).astype(np.uint8)
 
     return preview
 

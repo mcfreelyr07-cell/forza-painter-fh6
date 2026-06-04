@@ -134,7 +134,7 @@ def prepare_region_pass(
     base_json = Path(state.base_json)
     try:
         existing = load_shapes_from_json(base_json) if base_json.exists() else []
-        rendered = render_shapes_to_array(existing)
+        rendered = render_shapes_to_array(existing, target_png)
         if rendered is None:
             raise RuntimeError("cv2/numpy unavailable")
         # Load original target as BGRA (preserve alpha for transparent pixels).
