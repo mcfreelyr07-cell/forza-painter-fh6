@@ -55,61 +55,41 @@ def _copy_exe_preview(
     return True
 
 
-def render_preview(
-    target_path: str | Path,
-    shapes: list[dict],
-    output_path: str | Path,
-    max_preview_size: int = 500,
-) -> None:
-    """Render *shapes* and save to *output_path* using OpenCV.
+def render_shapes_to_array(shapes: list[dict]) -> "np.ndarray | None":
+    """Render *shapes* to a BGR ``numpy`` array (full resolution, no resize).
 
-    Matches the rendering approach in ``main.py`` load_geometry():
-    background rectangle (type-1, shapes[0]) first, then filled
-    rotated ellipses (type-16) drawn in BGR colour order.
-
-    Falls back to copying the exe's own preview if cv2 is unavailable.
+    Returns ``None`` if cv2/numpy is unavailable or shapes is empty.
+    Used by Solution 3: composite the rendered current state with the
+    original target so the exe sees error=0 outside the selected region.
     """
-    target_path = Path(target_path)
-    output_path = Path(output_path)
-
     loaded = load_cv2()
     if not loaded:
-        # cv2 not available — try exe preview in parent dir
-        _copy_exe_preview(output_path.parent, output_path, max_preview_size)
-        return
+        return None
+    _cv2, np = loaded
 
-    cv2, np = loaded
-
-    # --- Determine canvas size from shapes[0] (background rect) ---
     if not shapes:
-        return
+        return None
     bg_data = shapes[0].get("data", [])
     bg_color = shapes[0].get("color", [0, 0, 0, 255])
-    if len(bg_data) >= 4:
-        image_w = int(bg_data[2])
-        image_h = int(bg_data[3])
-    else:
-        # Fallback: load target image for dimensions.
-        img = cv2.imread(str(target_path), cv2.IMREAD_COLOR)
-        if img is None:
-            return
-        image_h, image_w = img.shape[:2]
+    if len(bg_data) < 4:
+        return None
+    image_w = int(bg_data[2])
+    image_h = int(bg_data[3])
 
-    # --- Create canvas ---
     canvas = np.zeros((image_h, image_w, 3), np.uint8)
-
     bg_r, bg_g, bg_b, bg_a = bg_color[:4] if len(bg_color) >= 4 else (0, 0, 0, 255)
     if bg_a > 0:
-        cv2.rectangle(
-            canvas, (0, 0), (image_w, image_h),
-            (bg_b, bg_g, bg_r), thickness=-1,
-        )
-    else:
-        canvas[:, :] = (38, 38, 38)  # dark gray fallback
+        _cv2.rectangle(canvas, (0, 0), (image_w, image_h), (bg_b, bg_g, bg_r), thickness=-1)
+    # else: keep black — transparent areas handled by composite alpha logic
 
-    # --- Draw shapes on top (with alpha blending for semi-transparent shapes) ---
-    temp = np.zeros_like(canvas)  # reusable buffer for alpha-blended shapes
-    for shape in shapes[1:]:
+    _draw_shapes_on_canvas(np, _cv2, canvas, shapes[1:])
+    return canvas
+
+
+def _draw_shapes_on_canvas(np, cv2_mod, canvas, shapes: list[dict]) -> None:
+    """Draw *shapes* onto *canvas* (BGR numpy array, mutated in-place)."""
+    temp = np.zeros_like(canvas)
+    for shape in shapes:
         shape_type = shape.get("type", 0)
         color = shape.get("color", [0, 0, 0, 255])
         if len(color) < 4:
@@ -119,9 +99,9 @@ def render_preview(
             continue
 
         bgr = (b, g, r)
-        alpha_factor = a / 255.0  # float [0, 1]
+        alpha_factor = a / 255.0
 
-        if shape_type == 16:  # rotated ellipse
+        if shape_type == 16:
             data = shape.get("data", [])
             if len(data) < 5:
                 continue
@@ -129,19 +109,19 @@ def render_preview(
             if w <= 0 or h <= 0:
                 continue
             cx, cy = int(x), int(y)
-            axes = (int(h), int(w))  # cv2: (height, width) semi-axes
+            axes = (int(h), int(w))
             angle = -90 + rot_deg
 
             if a >= 255:
-                cv2.ellipse(canvas, (cx, cy), axes, angle, 0.0, 360, bgr, thickness=-1)
+                cv2_mod.ellipse(canvas, (cx, cy), axes, angle, 0.0, 360, bgr, thickness=-1)
             else:
                 temp.fill(0)
-                cv2.ellipse(temp, (cx, cy), axes, angle, 0.0, 360, (255, 255, 255), thickness=-1)
+                cv2_mod.ellipse(temp, (cx, cy), axes, angle, 0.0, 360, (255, 255, 255), thickness=-1)
                 mask = (temp[:, :, 0] > 0).astype(np.float32) * alpha_factor
                 for c in range(3):
                     canvas[:, :, c] = (canvas[:, :, c] * (1.0 - mask) + bgr[c] * mask).astype(np.uint8)
 
-        elif shape_type == 1:  # rectangle (non-background)
+        elif shape_type == 1:
             data = shape.get("data", [])
             if len(data) < 4:
                 continue
@@ -152,23 +132,60 @@ def render_preview(
             y1 = int(round(y + h / 2))
 
             if a >= 255:
-                cv2.rectangle(canvas, (x0, y0), (x1, y1), bgr, thickness=-1)
+                cv2_mod.rectangle(canvas, (x0, y0), (x1, y1), bgr, thickness=-1)
             else:
                 temp.fill(0)
-                cv2.rectangle(temp, (x0, y0), (x1, y1), (255, 255, 255), thickness=-1)
+                cv2_mod.rectangle(temp, (x0, y0), (x1, y1), (255, 255, 255), thickness=-1)
                 mask = (temp[:, :, 0] > 0).astype(np.float32) * alpha_factor
                 for c in range(3):
                     canvas[:, :, c] = (canvas[:, :, c] * (1.0 - mask) + bgr[c] * mask).astype(np.uint8)
 
-    # --- Resize ---
+
+def render_preview(
+    target_path: str | Path,
+    shapes: list[dict],
+    output_path: str | Path,
+    max_preview_size: int = 500,
+) -> None:
+    """Render *shapes* and save to *output_path* using OpenCV."""
+    target_path = Path(target_path)
+    output_path = Path(output_path)
+
+    loaded = load_cv2()
+    if not loaded:
+        _copy_exe_preview(output_path.parent, output_path, max_preview_size)
+        return
+
+    _cv2, np = loaded
+
+    if not shapes:
+        return
+    bg_data = shapes[0].get("data", [])
+    if len(bg_data) >= 4:
+        image_w, image_h = int(bg_data[2]), int(bg_data[3])
+    else:
+        img = _cv2.imread(str(target_path), _cv2.IMREAD_COLOR)
+        if img is None:
+            return
+        image_h, image_w = img.shape[:2]
+
+    canvas = np.zeros((image_h, image_w, 3), np.uint8)
+    bg_color = shapes[0].get("color", [0, 0, 0, 255])
+    bg_r, bg_g, bg_b, bg_a = bg_color[:4] if len(bg_color) >= 4 else (0, 0, 0, 255)
+    if bg_a > 0:
+        _cv2.rectangle(canvas, (0, 0), (image_w, image_h), (bg_b, bg_g, bg_r), thickness=-1)
+    else:
+        canvas[:, :] = (38, 38, 38)
+
+    _draw_shapes_on_canvas(np, _cv2, canvas, shapes[1:])
+
     if max(image_w, image_h) > max_preview_size:
         ratio = max_preview_size / max(image_w, image_h)
-        new_w = max(1, int(image_w * ratio))
-        new_h = max(1, int(image_h * ratio))
-        canvas = cv2.resize(canvas, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+        new_w, new_h = max(1, int(image_w * ratio)), max(1, int(image_h * ratio))
+        canvas = _cv2.resize(canvas, (new_w, new_h), interpolation=_cv2.INTER_LANCZOS4)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(output_path), canvas)
+    _cv2.imwrite(str(output_path), canvas)
 
 
 def load_shapes_from_json(json_path: str | Path) -> list[dict]:

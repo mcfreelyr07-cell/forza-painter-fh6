@@ -12,11 +12,20 @@ from typing import Callable
 
 from PIL import Image
 
+from PIL import Image
+
 from generator_backend import GENERATOR_EXE, parse_settings
 from region_painter.ini_manager import modify_ini
-from region_painter.image_processor import apply_selection_mask
-from region_painter.preview_renderer import load_shapes_from_json, render_preview
+from region_painter.preview_renderer import (
+    load_shapes_from_json,
+    render_preview,
+    render_shapes_to_array,
+)
 from region_painter.state_manager import StateManager
+
+# Lazy-loaded via utils.load_cv2 in the composite path.
+_np = None
+_cv2 = None
 
 ProgressCallback = Callable[[str], None]
 
@@ -117,10 +126,46 @@ def prepare_region_pass(
     target_png = Path(state.target_path)
     pass_n = len(state.passes) + 1
     region_target = output_dir / f"region_target_pass{pass_n}.png"
+    # --- Solution 3: composite target image ---
+    # Render current accumulated shapes; non-selected region shows the
+    # rendered state (error=0 for exe), selected region shows original
+    # target (error≠0 → exe generates new shapes there).
+    # This keeps opaqueMask uniform (all 1s) → occlusion culling works.
+    base_json = Path(state.base_json)
     try:
-        apply_selection_mask(target_png, selection_mask, region_target, feather_radius=0)
+        existing = load_shapes_from_json(base_json) if base_json.exists() else []
+        rendered = render_shapes_to_array(existing)
+        if rendered is None:
+            raise RuntimeError("cv2/numpy unavailable")
+        # Load original target as BGRA (preserve alpha for transparent pixels).
+        from utils import load_cv2
+        loaded = load_cv2()
+        if not loaded:
+            raise RuntimeError("cv2 unavailable")
+        _cv2_mod, np_mod = loaded
+        target_bgra = _cv2_mod.imread(str(target_png), _cv2_mod.IMREAD_UNCHANGED)
+        if target_bgra is None:
+            raise RuntimeError(f"Cannot read target: {target_png}")
+        has_alpha = target_bgra.shape[2] == 4
+        target_rgb = target_bgra[:, :, :3]
+        target_a = target_bgra[:, :, 3] if has_alpha else np_mod.full(
+            target_rgb.shape[:2], 255, dtype=np_mod.uint8,
+        )
+        h, w = target_rgb.shape[:2]
+        # Convert PIL 'L' mask to numpy, resize to match target dimensions.
+        mask_pil = selection_mask.resize((w, h), Image.NEAREST)
+        mask_np = np_mod.array(mask_pil, dtype=np_mod.float32) / 255.0
+        mask_np = np_mod.clip(mask_np, 0.0, 1.0)
+        mask_3ch = np_mod.stack([mask_np, mask_np, mask_np], axis=-1)
+        # Composite RGB: mask → target; 1-mask → rendered current.
+        composite_rgb = (target_rgb.astype(np_mod.float32) * mask_3ch +
+                         rendered.astype(np_mod.float32) * (1.0 - mask_3ch))
+        composite_rgb = composite_rgb.astype(np_mod.uint8)
+        # Alpha: use target's original alpha (transparent stays transparent).
+        composite = np_mod.dstack([composite_rgb, target_a])
+        _cv2_mod.imwrite(str(region_target), composite)
     except Exception as exc:
-        return {"error": f"Failed to apply selection mask: {exc}"}
+        return {"error": f"Failed to build composite target: {exc}"}
     mask_png = output_dir / f"pass_{pass_n}_mask.png"
     selection_mask.save(mask_png, "PNG")
     settings_path = Path(state._data.get("original_ini", ""))
