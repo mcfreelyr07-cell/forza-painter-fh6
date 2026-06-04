@@ -55,8 +55,7 @@ def _draw_shapes_to_canvas(cv2, np, shapes, image_w, image_h):
     if len(bg_color) == 4 and int(bg_color[3]) > 0:
         bg_r, bg_g, bg_b, _bg_a = [int(c) for c in bg_color]
         cv2.rectangle(canvas, (0, 0), (image_w, image_h), (bg_b, bg_g, bg_r), thickness=-1)
-    else:
-        canvas[:, :] = (38, 38, 38)
+    # else: keep black (transparent)
 
     for shape in shapes[1:]:
         color = shape.get("color", [])
