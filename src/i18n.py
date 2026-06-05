@@ -140,6 +140,30 @@ Notes
 - JSON generation uses the bundled GPU/OpenCL generator, so keep the graphics driver updated.
 - Current FH6 addresses are valid only for the current game process and editor state.
 - If the app cannot find a safe template, confirm the editor is open, the template is ungrouped, and the layer count is exact.
+
+Region Paint
+
+Region Paint lets you iteratively refine specific areas of an image. Instead of generating all layers at once, you generate a base layer pass first, then select regions (faces, details, etc.) and add extra layers only to those areas.
+
+1. Open Region Paint tab. Click Add Image to select a PNG/JPG/BMP.
+
+2. Choose a Quality Profile — this sets the Total budget (stopAt value from the profile). Adjust First-pass layers (how many layers to generate initially across the whole image) and Region layers (how many to add per selected region).
+
+3. On the Original canvas, use Rectangle or Ellipse tool to draw a selection region. The red overlay shows your selection. Use Clear Mask to remove the selection.
+
+4. Click Start First Pass to generate the base layers. Wait for completion — a preview appears on the right canvas.
+
+5. Draw a selection region on the left canvas, then click Paint Selected Region to add more layers only inside that region. Repeat for each area you want to refine.
+
+6. After all passes, use Open Result Folder to find base.json in the output directory, or Save Result JSON to export it to a custom location.
+
+7. Import the result JSON using the Import tab — same workflow as standard generation.
+
+Tips
+
+- The remaining budget is shown next to Remaining. Each region pass consumes layers from this budget.
+- Feather controls how soft the selection edge blends into the surrounding area.
+- You can run multiple region passes on the same area for extra refinement.
 """,
         "region_paint_tab": "Region Paint",
         "region_step_image": "Step 1 — Choose image & profile",
@@ -308,6 +332,30 @@ Observações
 - A geração de JSON usa o gerador GPU/OpenCL incluído, então mantenha o driver de vídeo atualizado.
 - Os endereços atuais do FH6 só são válidos para o processo atual do jogo e o estado atual do editor.
 - Se o app não encontrar um modelo seguro, confirme que o editor está aberto, que o modelo está desagrupado e que a contagem de camadas está exata.
+
+Region Paint
+
+Region Paint lets you iteratively refine specific areas of an image. Instead of generating all layers at once, you generate a base layer pass first, then select regions (faces, details, etc.) and add extra layers only to those areas.
+
+1. Open Region Paint tab. Click Add Image to select a PNG/JPG/BMP.
+
+2. Choose a Quality Profile — this sets the Total budget (stopAt value from the profile). Adjust First-pass layers (how many layers to generate initially across the whole image) and Region layers (how many to add per selected region).
+
+3. On the Original canvas, use Rectangle or Ellipse tool to draw a selection region. The red overlay shows your selection. Use Clear Mask to remove the selection.
+
+4. Click Start First Pass to generate the base layers. Wait for completion — a preview appears on the right canvas.
+
+5. Draw a selection region on the left canvas, then click Paint Selected Region to add more layers only inside that region. Repeat for each area you want to refine.
+
+6. After all passes, use Open Result Folder to find base.json in the output directory, or Save Result JSON to export it to a custom location.
+
+7. Import the result JSON using the Import tab — same workflow as standard generation.
+
+Tips
+
+- The remaining budget is shown next to Remaining. Each region pass consumes layers from this budget.
+- Feather controls how soft the selection edge blends into the surrounding area.
+- You can run multiple region passes on the same area for extra refinement.
 """,
         "region_paint_tab": "Region Paint",
         "region_step_image": "Step 1 — Choose image & profile",
@@ -476,6 +524,30 @@ Observações
 - JSON 生成使用自带的 GPU/OpenCL 生成器，请保持显卡驱动正常。
 - FH6 地址只对当前游戏进程和当前编辑器状态有效。
 - 如果软件找不到安全模板，请确认编辑器仍然打开、模板已经 ungroup、层数填写完全正确。
+
+Region Paint
+
+Region Paint lets you iteratively refine specific areas of an image. Instead of generating all layers at once, you generate a base layer pass first, then select regions (faces, details, etc.) and add extra layers only to those areas.
+
+1. Open Region Paint tab. Click Add Image to select a PNG/JPG/BMP.
+
+2. Choose a Quality Profile — this sets the Total budget (stopAt value from the profile). Adjust First-pass layers (how many layers to generate initially across the whole image) and Region layers (how many to add per selected region).
+
+3. On the Original canvas, use Rectangle or Ellipse tool to draw a selection region. The red overlay shows your selection. Use Clear Mask to remove the selection.
+
+4. Click Start First Pass to generate the base layers. Wait for completion — a preview appears on the right canvas.
+
+5. Draw a selection region on the left canvas, then click Paint Selected Region to add more layers only inside that region. Repeat for each area you want to refine.
+
+6. After all passes, use Open Result Folder to find base.json in the output directory, or Save Result JSON to export it to a custom location.
+
+7. Import the result JSON using the Import tab — same workflow as standard generation.
+
+Tips
+
+- The remaining budget is shown next to Remaining. Each region pass consumes layers from this budget.
+- Feather controls how soft the selection edge blends into the surrounding area.
+- You can run multiple region passes on the same area for extra refinement.
 """,
         "region_paint_tab": "Region Paint",
         "region_step_image": "Step 1 — Choose image & profile",
@@ -644,6 +716,30 @@ Observações
 - JSON 產生使用內建的 GPU/OpenCL 產生器，請保持顯示卡驅動程式正常。
 - FH6 位址只對目前遊戲處理程序和目前編輯器狀態有效。
 - 如果軟體找不到安全模板，請確認編輯器仍然開啟、模板已經 ungroup、圖層數填寫完全正確。
+
+Region Paint
+
+Region Paint lets you iteratively refine specific areas of an image. Instead of generating all layers at once, you generate a base layer pass first, then select regions (faces, details, etc.) and add extra layers only to those areas.
+
+1. Open Region Paint tab. Click Add Image to select a PNG/JPG/BMP.
+
+2. Choose a Quality Profile — this sets the Total budget (stopAt value from the profile). Adjust First-pass layers (how many layers to generate initially across the whole image) and Region layers (how many to add per selected region).
+
+3. On the Original canvas, use Rectangle or Ellipse tool to draw a selection region. The red overlay shows your selection. Use Clear Mask to remove the selection.
+
+4. Click Start First Pass to generate the base layers. Wait for completion — a preview appears on the right canvas.
+
+5. Draw a selection region on the left canvas, then click Paint Selected Region to add more layers only inside that region. Repeat for each area you want to refine.
+
+6. After all passes, use Open Result Folder to find base.json in the output directory, or Save Result JSON to export it to a custom location.
+
+7. Import the result JSON using the Import tab — same workflow as standard generation.
+
+Tips
+
+- The remaining budget is shown next to Remaining. Each region pass consumes layers from this budget.
+- Feather controls how soft the selection edge blends into the surrounding area.
+- You can run multiple region passes on the same area for extra refinement.
 """,
         "region_paint_tab": "Region Paint",
         "region_step_image": "Step 1 — Choose image & profile",
@@ -812,6 +908,30 @@ Observações
 - JSON 생성은 포함된 GPU/OpenCL 생성기를 사용하므로 그래픽 드라이버를 최신 상태로 유지하세요.
 - 현재 FH6 주소는 현재 게임 프로세스와 현재 편집기 상태에서만 유효합니다.
 - 앱이 안전한 템플릿을 찾지 못하면 편집기가 열려 있는지, 템플릿이 ungroup 상태인지, 레이어 수가 정확한지 확인하세요.
+
+Region Paint
+
+Region Paint lets you iteratively refine specific areas of an image. Instead of generating all layers at once, you generate a base layer pass first, then select regions (faces, details, etc.) and add extra layers only to those areas.
+
+1. Open Region Paint tab. Click Add Image to select a PNG/JPG/BMP.
+
+2. Choose a Quality Profile — this sets the Total budget (stopAt value from the profile). Adjust First-pass layers (how many layers to generate initially across the whole image) and Region layers (how many to add per selected region).
+
+3. On the Original canvas, use Rectangle or Ellipse tool to draw a selection region. The red overlay shows your selection. Use Clear Mask to remove the selection.
+
+4. Click Start First Pass to generate the base layers. Wait for completion — a preview appears on the right canvas.
+
+5. Draw a selection region on the left canvas, then click Paint Selected Region to add more layers only inside that region. Repeat for each area you want to refine.
+
+6. After all passes, use Open Result Folder to find base.json in the output directory, or Save Result JSON to export it to a custom location.
+
+7. Import the result JSON using the Import tab — same workflow as standard generation.
+
+Tips
+
+- The remaining budget is shown next to Remaining. Each region pass consumes layers from this budget.
+- Feather controls how soft the selection edge blends into the surrounding area.
+- You can run multiple region passes on the same area for extra refinement.
 """,
         "region_paint_tab": "Region Paint",
         "region_step_image": "Step 1 — Choose image & profile",
@@ -979,6 +1099,30 @@ Notas
 - La generación de JSON usa el generador GPU/OpenCL incluido, así que mantén actualizado el controlador de video.
 - Las direcciones actuales de FH6 solo son válidas para el proceso actual del juego y el estado actual del editor.
 - Si la app no encuentra una plantilla segura, confirma que el editor esté abierto, que la plantilla esté desagrupada y que la cantidad de capas sea exacta.
+
+Region Paint
+
+Region Paint lets you iteratively refine specific areas of an image. Instead of generating all layers at once, you generate a base layer pass first, then select regions (faces, details, etc.) and add extra layers only to those areas.
+
+1. Open Region Paint tab. Click Add Image to select a PNG/JPG/BMP.
+
+2. Choose a Quality Profile — this sets the Total budget (stopAt value from the profile). Adjust First-pass layers (how many layers to generate initially across the whole image) and Region layers (how many to add per selected region).
+
+3. On the Original canvas, use Rectangle or Ellipse tool to draw a selection region. The red overlay shows your selection. Use Clear Mask to remove the selection.
+
+4. Click Start First Pass to generate the base layers. Wait for completion — a preview appears on the right canvas.
+
+5. Draw a selection region on the left canvas, then click Paint Selected Region to add more layers only inside that region. Repeat for each area you want to refine.
+
+6. After all passes, use Open Result Folder to find base.json in the output directory, or Save Result JSON to export it to a custom location.
+
+7. Import the result JSON using the Import tab — same workflow as standard generation.
+
+Tips
+
+- The remaining budget is shown next to Remaining. Each region pass consumes layers from this budget.
+- Feather controls how soft the selection edge blends into the surrounding area.
+- You can run multiple region passes on the same area for extra refinement.
 """,
         "region_paint_tab": "Region Paint",
         "region_step_image": "Step 1 — Choose image & profile",
