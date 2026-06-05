@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 from enum import IntEnum
 from pathlib import Path
@@ -66,8 +67,18 @@ def normalize_geometry_payload(payload):
     return {"shapes": [background] + drawables}
 
 
+@functools.lru_cache(maxsize=128)
+def _load_normalized_geometry_cached(path_str, mtime_ns, size):
+    return normalize_geometry_payload(load_geometry_payload(path_str))
+
+
 def load_normalized_geometry(path):
-    return normalize_geometry_payload(load_geometry_payload(path))
+    path = Path(path)
+    try:
+        stat = path.stat()
+        return _load_normalized_geometry_cached(str(path.resolve()), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return normalize_geometry_payload(load_geometry_payload(path))
 
 
 def drawable_shape_count(path):

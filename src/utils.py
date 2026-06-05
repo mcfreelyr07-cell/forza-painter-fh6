@@ -81,3 +81,24 @@ def load_pillow() -> Tuple[Any, Any] | None:
     except Exception as exc:
         load_pillow._error = exc  # type: ignore[attr-defined]
         return None
+
+
+def load_numpy():
+    """Lazy-load NumPy, caching the result.
+
+    Returns the numpy module or None on failure.
+    """
+    if not hasattr(load_numpy, "_cache"):
+        load_numpy._cache = None  # type: ignore[attr-defined]
+        load_numpy._error = None  # type: ignore[attr-defined]
+    if load_numpy._cache is not None:  # type: ignore[attr-defined]
+        return load_numpy._cache  # type: ignore[attr-defined]
+    if load_numpy._error is not None:  # type: ignore[attr-defined]
+        return None
+    try:
+        np_mod = importlib.import_module("numpy")
+        load_numpy._cache = np_mod  # type: ignore[attr-defined]
+        return load_numpy._cache  # type: ignore[attr-defined]
+    except Exception as exc:
+        load_numpy._error = exc  # type: ignore[attr-defined]
+        return None

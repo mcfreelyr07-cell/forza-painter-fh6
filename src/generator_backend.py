@@ -32,6 +32,7 @@ GENERATOR_POLL_SLEEP_SECONDS = 0.2
 # ---------------------------------------------------------------------------
 
 SETTING_KEYS: tuple[str, ...] = (
+    "backend",
     "maxPreviewSize",
     "maxResolution",
     "maxThreads",
@@ -343,7 +344,8 @@ def preprocess_input_image(
     if mode == "luma_band":
         # Delayed import to avoid circular deps at module load time.
         luma_band = __import__("preprocess.luma", fromlist=["luma_band"]).luma_band
-        return luma_band(image_path)
+        max_res = setting.values.get("maxResolution")
+        return luma_band(image_path, max_resolution=int(max_res) if max_res else None)
     raise PreprocessError(f"unsupported preprocess mode: {mode}")
 
 
@@ -438,7 +440,7 @@ def build_generator_command(
     image_path: str | Path, setting: SettingProfile
 ) -> list[str]:
     image_path = Path(image_path)
-    return [
+    cmd = [
         str(GENERATOR_EXE),
         str(image_path),
         "-settings",
@@ -448,3 +450,7 @@ def build_generator_command(
         "-preview",
         str(generator_preview_path(image_path)),
     ]
+    backend = setting.values.get("backend", "").strip().lower()
+    if backend in ("vulkan", "opencl"):
+        cmd.extend(("-backend", backend))
+    return cmd

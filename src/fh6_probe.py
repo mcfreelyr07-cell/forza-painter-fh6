@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import base64
+import concurrent.futures
 import ctypes
 import json
+import os
 import struct
 import sys
+import threading
 import time
 import zlib
 from ctypes import wintypes
@@ -506,69 +509,170 @@ def locate_clivery_group_rtti(pid, max_seconds=None):
     }
 
 
+def _process_rtti_region(pid, profile, layer_count, vtable_patterns, started, max_seconds, cancel_event, region):
+    base, size, _protect, _type = region
+    groups = []
+    if cancel_event.is_set():
+        return groups
+    if max_seconds and time.monotonic() - started > max_seconds:
+        return groups
+    memory = read_region(pid, base, size)
+    if not memory:
+        return groups
+    for vtable, pattern in vtable_patterns:
+        if cancel_event.is_set():
+            return groups
+        start = 0
+        while True:
+            pos = memory.find(pattern, start)
+            if pos == -1:
+                break
+            group_address = base + pos
+            start = pos + 8
+            count_address = group_address + profile.livery_count_offset
+            table_field = group_address + profile.layer_table_offset
+            try:
+                current_count = read_u16(pid, count_address)
+                table_address = read_u64(pid, table_field)
+            except Exception:
+                continue
+            if current_count != layer_count:
+                continue
+            if not table_address or not is_user_pointer(table_address):
+                continue
+            if not is_private_writable_address(pid, table_address):
+                continue
+            score, samples = score_table(pid, profile, table_address, min(layer_count, 64))
+            if score <= 0:
+                continue
+            ok, checked, valid_entries = validate_table_layer_coverage(pid, profile, table_address, layer_count)
+            if not ok:
+                print(
+                    f"rejected RTTI group=0x{group_address:x} table=0x{table_address:x} "
+                    f"strictLayers={valid_entries}/{layer_count} scanned={checked}",
+                    flush=True,
+                )
+                continue
+            groups.append({
+                "score": score + 100,
+                "group_address": group_address,
+                "count_address": count_address,
+                "table_pointer_field": table_field,
+                "table_address": table_address,
+                "count_kind": "u16_rtti",
+                "current_u16": current_count,
+                "current_u32": current_count,
+                "samples": samples,
+                "validated_entries": valid_entries,
+                "vtable": vtable,
+            })
+            cancel_event.set()
+    return groups
+
+
 def locate_clivery_groups_by_rtti(pid, profile, layer_count, max_seconds=None):
     started = time.monotonic()
     rtti = locate_clivery_group_rtti(pid, max_seconds=max_seconds)
     if not rtti:
         return []
 
-    groups = []
     vtable_patterns = [(vtable, struct.pack("<Q", vtable)) for vtable in rtti["vtables"]]
     private_regions = list(iter_regions(pid, type_filter=MEM_PRIVATE, writable_only=True))
-    for base, size, _protect, _type in private_regions:
-        if max_seconds and time.monotonic() - started > max_seconds:
-            print(f"Stopped RTTI heap scan after {max_seconds} seconds.", flush=True)
+    num_workers = min(os.cpu_count() or 4, 4)
+    cancel_event = threading.Event()
+    all_groups = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = [
+            executor.submit(
+                _process_rtti_region,
+                pid, profile, layer_count, vtable_patterns, started, max_seconds, cancel_event, region,
+            )
+            for region in private_regions
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                groups = future.result()
+            except Exception:
+                continue
+            all_groups.extend(groups)
+            if groups:
+                cancel_event.set()
+    all_groups.sort(key=lambda item: item["score"], reverse=True)
+    return all_groups
+
+
+def _process_layout_region(pid, profile, layer_count, pattern, chunk_size, max_candidates_per_region, strategy_name, started, max_seconds, cancel_event, region):
+    base, size, _protect, _type = region
+    local_candidates = 0
+    local_groups = []
+    local_scanned = 0
+    offset = 0
+    carry = b""
+    while offset < size:
+        if cancel_event.is_set():
             break
-        memory = read_region(pid, base, size)
-        if not memory:
+        if max_seconds and time.monotonic() - started > max_seconds:
+            break
+        to_read = min(chunk_size, size - offset)
+        chunk_base = base + offset
+        memory = read_process_memory(pid, chunk_base, to_read)
+        if memory:
+            local_scanned += len(memory)
+        if not memory or len(memory) < 2:
+            carry = b""
+            offset += to_read
             continue
-        for vtable, pattern in vtable_patterns:
-            start = 0
-            while True:
-                pos = memory.find(pattern, start)
-                if pos == -1:
-                    break
-                group_address = base + pos
-                start = pos + 8
-                count_address = group_address + profile.livery_count_offset
-                table_field = group_address + profile.layer_table_offset
-                try:
-                    current_count = read_u16(pid, count_address)
-                    table_address = read_u64(pid, table_field)
-                except Exception:
-                    continue
-                if current_count != layer_count:
-                    continue
-                if not table_address or not is_user_pointer(table_address):
-                    continue
-                if not is_private_writable_address(pid, table_address):
-                    continue
-                score, samples = score_table(pid, profile, table_address, min(layer_count, 64))
-                if score <= 0:
-                    continue
-                ok, checked, valid_entries = validate_table_layer_coverage(pid, profile, table_address, layer_count)
-                if not ok:
-                    print(
-                        f"rejected RTTI group=0x{group_address:x} table=0x{table_address:x} "
-                        f"strictLayers={valid_entries}/{layer_count} scanned={checked}",
-                        flush=True,
-                    )
-                    continue
-                groups.append({
-                    "score": score + 100,
-                    "group_address": group_address,
-                    "count_address": count_address,
-                    "table_pointer_field": table_field,
-                    "table_address": table_address,
-                    "count_kind": "u16_rtti",
-                    "current_u16": current_count,
-                    "current_u32": current_count,
-                    "samples": samples,
-                    "validated_entries": valid_entries,
-                    "vtable": vtable,
-                })
-    groups.sort(key=lambda item: item["score"], reverse=True)
-    return groups
+        scan_base = chunk_base - len(carry)
+        scan = carry + memory
+        start = 0
+        while True:
+            pos = scan.find(pattern, start)
+            if pos == -1:
+                break
+            start = pos + 1
+            local_candidates += 1
+            if local_candidates > max_candidates_per_region:
+                return local_candidates, local_groups, local_scanned
+            count_address = scan_base + pos
+            group_address = count_address - profile.livery_count_offset
+            if group_address < base:
+                continue
+            table_field = group_address + profile.layer_table_offset
+            try:
+                table_address = read_u64(pid, table_field)
+            except Exception:
+                continue
+            if not table_address or not is_user_pointer(table_address):
+                continue
+            if not is_private_writable_address(pid, table_address):
+                continue
+            score, samples = score_table(pid, profile, table_address, min(layer_count, 64))
+            if score <= 0:
+                continue
+            ok, checked, valid_entries = validate_table_layer_coverage(pid, profile, table_address, layer_count)
+            if not ok:
+                continue
+            cancel_event.set()
+            local_groups.append({
+                "score": score + 60,
+                "group_address": group_address,
+                "count_address": count_address,
+                "table_pointer_field": table_field,
+                "table_address": table_address,
+                "count_kind": f"u16_group_layout:{strategy_name}",
+                "current_u16": layer_count,
+                "current_u32": layer_count,
+                "samples": samples,
+                "validated_entries": valid_entries,
+            })
+            print(
+                f"{strategy_name} candidate group=0x{group_address:x} count=0x{count_address:x} "
+                f"table=0x{table_address:x} validated={valid_entries}/{layer_count}",
+                flush=True,
+            )
+        carry = memory[-(len(pattern) - 1):]
+        offset += to_read
+    return local_candidates, local_groups, local_scanned
 
 
 def locate_clivery_groups_by_layout_count(
@@ -583,103 +687,51 @@ def locate_clivery_groups_by_layout_count(
 ):
     started = time.monotonic()
     pattern = struct.pack("<H", layer_count)
-    groups = []
-    candidates = 0
-    scanned = 0
+    total_candidates = 0
+    total_scanned = 0
     chunk_size = 4 * 1024 * 1024
     regions = list(iter_regions(pid, type_filter=MEM_PRIVATE, writable_only=True))
     if max_region_size is not None:
         regions = [region for region in regions if region[1] <= max_region_size]
     if region_order == "size_desc":
-        # FH6 can put the active LiveryGroup inside very large heap regions.
         regions.sort(key=lambda item: item[1], reverse=True)
     elif region_order == "address_asc":
-        # v1.3-compatible path: useful when huge noisy regions would consume
-        # the v1.4 large-first scan budget before the old small-region hit.
         regions.sort(key=lambda item: item[0])
     print(
         f"Trying FH6 locator strategy {strategy_name}: regions={len(regions)} "
         f"order={region_order} maxRegion={max_region_size or 'none'}",
         flush=True,
     )
-    for base, size, _protect, _type in regions:
-        if max_seconds and time.monotonic() - started > max_seconds:
-            print(f"Stopped FH6 {strategy_name} scan after {max_seconds} seconds.", flush=True)
-            break
-        offset = 0
-        carry = b""
-        while offset < size:
-            if max_seconds and time.monotonic() - started > max_seconds:
-                print(f"Stopped FH6 {strategy_name} scan after {max_seconds} seconds.", flush=True)
-                break
-            to_read = min(chunk_size, size - offset)
-            chunk_base = base + offset
-            memory = read_process_memory(pid, chunk_base, to_read)
-            if memory:
-                scanned += len(memory)
-            if not memory or len(memory) < 2:
-                carry = b""
-                offset += to_read
+    num_workers = min(os.cpu_count() or 4, 8)
+    per_region_limit = max(1000, max_candidates // max(1, len(regions)))
+    cancel_event = threading.Event()
+    all_groups = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = [
+            executor.submit(
+                _process_layout_region,
+                pid, profile, layer_count, pattern, chunk_size,
+                per_region_limit, strategy_name, started, max_seconds, cancel_event, region,
+            )
+            for region in regions
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                candidates, groups, scanned = future.result()
+            except Exception:
                 continue
-            scan_base = chunk_base - len(carry)
-            scan = carry + memory
-            start = 0
-            while True:
-                pos = scan.find(pattern, start)
-                if pos == -1:
-                    break
-                start = pos + 1
-                candidates += 1
-                if candidates > max_candidates:
-                    print(f"Stopped FH6 {strategy_name} scan after {max_candidates} count hits.", flush=True)
-                    return groups
-                count_address = scan_base + pos
-                group_address = count_address - profile.livery_count_offset
-                if group_address < base:
-                    continue
-                table_field = group_address + profile.layer_table_offset
-                try:
-                    table_address = read_u64(pid, table_field)
-                except Exception:
-                    continue
-                if not table_address or not is_user_pointer(table_address):
-                    continue
-                if not is_private_writable_address(pid, table_address):
-                    continue
-                score, samples = score_table(pid, profile, table_address, min(layer_count, 64))
-                if score <= 0:
-                    continue
-                ok, checked, valid_entries = validate_table_layer_coverage(pid, profile, table_address, layer_count)
-                if not ok:
-                    continue
-                groups.append({
-                    "score": score + 60,
-                    "group_address": group_address,
-                    "count_address": count_address,
-                    "table_pointer_field": table_field,
-                    "table_address": table_address,
-                    "count_kind": f"u16_group_layout:{strategy_name}",
-                    "current_u16": layer_count,
-                    "current_u32": layer_count,
-                    "samples": samples,
-                    "validated_entries": valid_entries,
-                })
-                print(
-                    f"{strategy_name} candidate group=0x{group_address:x} count=0x{count_address:x} "
-                    f"table=0x{table_address:x} validated={valid_entries}/{layer_count}",
-                    flush=True,
-                )
-            carry = memory[-(len(pattern) - 1):]
-            offset += to_read
-        if groups:
-            break
+            total_candidates += candidates
+            total_scanned += scanned
+            all_groups.extend(groups)
+            if groups:
+                cancel_event.set()
     print(
-        f"FH6 {strategy_name} scan checked {scanned // (1024 * 1024)} MB, "
-        f"count hits={candidates}.",
+        f"FH6 {strategy_name} scan checked {total_scanned // (1024 * 1024)} MB, "
+        f"count hits={total_candidates}.",
         flush=True,
     )
-    groups.sort(key=lambda item: item["score"], reverse=True)
-    return groups
+    all_groups.sort(key=lambda item: item["score"], reverse=True)
+    return all_groups
 
 
 def serialize_samples(samples):

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+from concurrent.futures import ProcessPoolExecutor
 import io
+import multiprocessing as mp
 import json
 import math
 import os
@@ -51,7 +54,7 @@ from app_config import (
     Theme,
 )
 
-from utils import load_cv2, load_pillow
+from utils import load_cv2, load_numpy, load_pillow
 
 from i18n import tr
 
@@ -70,6 +73,7 @@ ETA_MAX_HISTORY_SECONDS = 180.0
 ETA_MIN_WINDOW_SECONDS = 4.0
 ETA_MIN_WINDOW_LAYERS = 25
 PREVIEW_JSON_SUPERSAMPLE = 2
+MAX_CONCURRENT_GENERATORS = min(max(os.cpu_count() or 4, 4), 12)
 PREVIEW_RESIZE_DEBOUNCE_MS = 500
 PREVIEW_RENDER_START_MS = 1
 PREVIEW_SIZE_BUCKET = 32
@@ -430,11 +434,164 @@ def pil_to_photo(image, max_size=None):
     return buffer.getvalue()
 
 
+# ---------------------------------------------------------------------------
+# Parallel preview rendering infrastructure
+# ---------------------------------------------------------------------------
+
+_PREVIEW_POOL: ProcessPoolExecutor | None = None
+
+
+def _get_preview_pool():
+    global _PREVIEW_POOL
+    if _PREVIEW_POOL is None:
+        _PREVIEW_POOL = ProcessPoolExecutor(max_workers=min(mp.cpu_count(), 8))
+    return _PREVIEW_POOL
+
+
+def _shutdown_preview_pool():
+    global _PREVIEW_POOL
+    if _PREVIEW_POOL is not None:
+        _PREVIEW_POOL.shutdown(wait=False)
+        _PREVIEW_POOL = None
+
+
+def _optimal_read_flags(path: str | Path, max_size: int | None) -> int:
+    """Pick cv2.IMREAD_REDUCED flag based on image dimensions vs target size.
+    Returns raw OpenCV flag values (avoiding global cv2 import).
+    """
+    if max_size is None:
+        return 1  # cv2.IMREAD_COLOR
+    try:
+        with open(path, "rb") as f:
+            sig = f.read(8)
+            if sig[:4] == b"\x89PNG":
+                f.read(4)
+                f.read(4)
+                import struct as _struct
+                w_bytes = f.read(4)
+                if len(w_bytes) == 4:
+                    width = _struct.unpack(">I", w_bytes)[0]
+                else:
+                    return 1
+            else:
+                return 1
+    except Exception:
+        return 1
+    ratio = max(width, 1) / max_size
+    if ratio >= 8.0:
+        return 65  # cv2.IMREAD_REDUCED_COLOR_8
+    if ratio >= 4.0:
+        return 33  # cv2.IMREAD_REDUCED_COLOR_4
+    if ratio >= 2.0:
+        return 17  # cv2.IMREAD_REDUCED_COLOR_2
+    return 1
+
+
+def _render_chunk_worker(args):
+    """Render one chunk of shapes in a child process.
+    args = (chunk_shapes, image_w, image_h, bg_r, bg_g, bg_b, bg_a, scale)
+    """
+    chunk_shapes, image_w, image_h, bg_r, bg_g, bg_b, bg_a, scale = args
+
+    import cv2 as _cv2
+    import numpy as _np
+
+    preview_h = max(1, int(round(image_h * scale)))
+    preview_w = max(1, int(round(image_w * scale)))
+
+    chunk = _np.zeros((preview_h, preview_w, 3), _np.uint8)
+
+    if bg_a > 0:
+        chunk[:, :] = (bg_b, bg_g, bg_r)
+    else:
+        chunk[:, :] = (38, 38, 38)
+        tile = max(8, int(round(32 * scale)))
+        ti, tj = _np.ogrid[:preview_h, :preview_w]
+        checker = ((ti // tile) + (tj // tile)) % 2 == 0
+        chunk[checker] = (58, 58, 58)
+
+    for shape in chunk_shapes:
+        color = [int(v) for v in shape.get("color", [])]
+        if len(color) == 4 and color[3] <= 0:
+            continue
+        r, g, b, _a = color
+        shape_type = int(shape.get("type", 0))
+        if shape_type == 16:
+            x, y, w, h, rot_deg = shape["data"]
+            center = (int(round(float(x) * scale)), int(round(float(y) * scale)))
+            axes = (max(1, int(round(float(h) * scale))), max(1, int(round(float(w) * scale))))
+            _cv2.ellipse(chunk, center, axes, -90.0 + float(rot_deg), 0.0, 360.0, (b, g, r), thickness=-1)
+        elif shape_type == 1:
+            x, y, w, h = [float(v) for v in shape["data"]]
+            x0 = int(round((x - w / 2) * scale))
+            y0 = int(round((y - h / 2) * scale))
+            x1 = int(round((x + w / 2) * scale))
+            y1 = int(round((y + h / 2) * scale))
+            _cv2.rectangle(chunk, (x0, y0), (x1, y1), (b, g, r), thickness=-1)
+
+    return chunk
+
+
+def _try_parallel_render(shapes, image_w, image_h, bg_r, bg_g, bg_b, bg_a, scale):
+    """Attempt parallel OpenCV rendering of shapes. Returns canvas or None."""
+    num_shapes = len(shapes) - 1
+    if num_shapes < 100:
+        return None
+
+    num_workers = min(mp.cpu_count(), num_shapes, 8)
+    if num_workers <= 1:
+        return None
+
+    shape_indices = list(range(1, len(shapes)))
+    chunk_size = (num_shapes + num_workers - 1) // num_workers
+    chunks = [shapes[i:i + chunk_size] for i in shape_indices[::chunk_size]]
+    num_workers = len(chunks)
+
+    try:
+        pool = _get_preview_pool()
+        futures = [
+            pool.submit(
+                _render_chunk_worker,
+                (chunk, image_w, image_h, bg_r, bg_g, bg_b, bg_a, scale),
+            )
+            for chunk in chunks
+        ]
+
+        results = [f.result() for f in futures]
+
+        preview = results[0]
+        if bg_a > 0:
+            bg_bgr = (bg_b, bg_g, bg_r)
+            for chunk in results[1:]:
+                keep = (
+                    (chunk[:, :, 0] != bg_bgr[0])
+                    | (chunk[:, :, 1] != bg_bgr[1])
+                    | (chunk[:, :, 2] != bg_bgr[2])
+                )
+                preview[keep] = chunk[keep]
+        else:
+            for chunk in results[1:]:
+                keep = (
+                    ((chunk[:, :, 0] != 38) | (chunk[:, :, 1] != 38) | (chunk[:, :, 2] != 38))
+                    & ((chunk[:, :, 0] != 58) | (chunk[:, :, 1] != 58) | (chunk[:, :, 2] != 58))
+                )
+                preview[keep] = chunk[keep]
+
+        return preview
+    except Exception:
+        return None
+
+
 def render_source_image(path, max_size=None):
     loaded = load_cv2()
     if loaded:
         cv2, _np = loaded
-        image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        target_dim = max(max_size) if max_size else 0
+        if target_dim and target_dim < 2048:
+            flags = _optimal_read_flags(path, target_dim)
+        else:
+            flags = cv2.IMREAD_COLOR
+        image = cv2.imread(str(path), flags)
         if image is not None:
             return image_to_photo(image, max_size)
     loaded = load_pillow()
@@ -621,30 +778,59 @@ def render_typecode_json(path, max_size=None):
         render_scale = scale * PREVIEW_JSON_SUPERSAMPLE
         render_w = max(1, preview_w * PREVIEW_JSON_SUPERSAMPLE)
         render_h = max(1, preview_h * PREVIEW_JSON_SUPERSAMPLE)
-        background = Image.new("RGB", (render_w, render_h), (38, 38, 38))
-        draw_bg = ImageDraw.Draw(background)
         tile = max(8, int(round(32 * render_scale)))
-        for y in range(0, render_h, tile):
-            for x in range(0, render_w, tile):
-                if ((x // tile) + (y // tile)) % 2 == 0:
-                    draw_bg.rectangle((x, y, min(render_w, x + tile), min(render_h, y + tile)), fill=(58, 58, 58))
-        preview_layer = Image.new("RGBA", (render_w, render_h), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(preview_layer, "RGBA")
-        for item in shapes:
-            r, g, b, a = item["color"]
-            if item.get("mask"):
-                mask = Image.new("L", (render_w, render_h), 0)
-                mask_draw = ImageDraw.Draw(mask)
+        np_mod = load_numpy()
+        if np_mod is not None:
+            pattern = np_mod.full((tile * 2, tile * 2, 3), (38, 38, 38), dtype=np.uint8)
+            pattern[:tile, :tile] = (58, 58, 58)
+            pattern[tile:, tile:] = (58, 58, 58)
+            full = np_mod.tile(pattern, (math.ceil(render_h / (tile * 2)), math.ceil(render_w / (tile * 2)), 1))
+            background = Image.fromarray(full[:render_h, :render_w], mode="RGB")
+        else:
+            background = Image.new("RGB", (render_w, render_h), (38, 38, 38))
+            draw_bg = ImageDraw.Draw(background)
+            for y in range(0, render_h, tile):
+                for x in range(0, render_w, tile):
+                    if ((x // tile) + (y // tile)) % 2 == 0:
+                        draw_bg.rectangle((x, y, min(render_w, x + tile), min(render_h, y + tile)), fill=(58, 58, 58))
+        cv2_loaded = load_cv2()
+        if cv2_loaded:
+            cv2, np = cv2_loaded
+            preview_arr = np.zeros((render_h, render_w, 4), dtype=np.uint8)
+            for item in shapes:
+                r, g, b, a = item["color"]
+                if item.get("mask"):
+                    mask_arr = np.zeros((render_h, render_w), dtype=np.uint8)
+                    for polygon in item["polygons"]:
+                        pts = np.array([((px - min_x) * render_scale, (py - min_y) * render_scale) for px, py in polygon], dtype=np.int32).reshape((-1, 1, 2))
+                        cv2.fillPoly(mask_arr, [pts], a)
+                    preview_arr[mask_arr > 0, 3] = 0
+                    continue
+                poly_list = []
+                for polygon in item["polygons"]:
+                    pts = np.array([((px - min_x) * render_scale, (py - min_y) * render_scale) for px, py in polygon], dtype=np.int32).reshape((-1, 1, 2))
+                    poly_list.append(pts)
+                if poly_list:
+                    cv2.fillPoly(preview_arr, poly_list, (r, g, b, a))
+            preview_layer = Image.fromarray(preview_arr, mode="RGBA")
+        else:
+            preview_layer = Image.new("RGBA", (render_w, render_h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(preview_layer, "RGBA")
+            for item in shapes:
+                r, g, b, a = item["color"]
+                if item.get("mask"):
+                    mask = Image.new("L", (render_w, render_h), 0)
+                    mask_draw = ImageDraw.Draw(mask)
+                    for polygon in item["polygons"]:
+                        points = [((px - min_x) * render_scale, (py - min_y) * render_scale) for px, py in polygon]
+                        mask_draw.polygon(points, fill=a)
+                    alpha = preview_layer.getchannel("A")
+                    alpha.paste(0, (0, 0), mask)
+                    preview_layer.putalpha(alpha)
+                    continue
                 for polygon in item["polygons"]:
                     points = [((px - min_x) * render_scale, (py - min_y) * render_scale) for px, py in polygon]
-                    mask_draw.polygon(points, fill=a)
-                alpha = preview_layer.getchannel("A")
-                alpha.paste(0, (0, 0), mask)
-                preview_layer.putalpha(alpha)
-                continue
-            for polygon in item["polygons"]:
-                points = [((px - min_x) * render_scale, (py - min_y) * render_scale) for px, py in polygon]
-                draw.polygon(points, fill=(r, g, b, a))
+                    draw.polygon(points, fill=(r, g, b, a))
         preview = background.convert("RGBA")
         preview.alpha_composite(preview_layer)
         preview = preview.convert("RGB")
@@ -680,10 +866,12 @@ def render_geometry_json(path, max_size=None):
         else:
             preview[:, :] = (38, 38, 38)
             tile = max(8, int(round(32 * scale)))
-            for y in range(0, preview_h, tile):
-                for x in range(0, preview_w, tile):
-                    if ((x // tile) + (y // tile)) % 2 == 0:
-                        preview[y:y + tile, x:x + tile] = (58, 58, 58)
+            ti, tj = np.ogrid[:preview_h, :preview_w]
+            checker = ((ti // tile) + (tj // tile)) % 2 == 0
+            preview[checker] = (58, 58, 58)
+        parallel_result = _try_parallel_render(shapes, image_w, image_h, bg_r, bg_g, bg_b, bg_a, scale)
+        if parallel_result is not None:
+            return image_to_photo(parallel_result, max_size)
         for shape in shapes[1:]:
             color = [int(v) for v in shape.get("color", [])]
             if len(color) == 4 and color[3] <= 0:
@@ -730,13 +918,22 @@ def render_geometry_json_pillow(path, max_size=None):
         if bg_a > 0:
             preview = Image.new("RGB", (render_w, render_h), (bg_r, bg_g, bg_b))
         else:
-            preview = Image.new("RGB", (render_w, render_h), (38, 38, 38))
-            draw_bg = ImageDraw.Draw(preview)
-            tile = max(8, int(round(32 * render_scale)))
-            for y in range(0, render_h, tile):
-                for x in range(0, render_w, tile):
-                    if ((x // tile) + (y // tile)) % 2 == 0:
-                        draw_bg.rectangle((x, y, min(render_w, x + tile), min(render_h, y + tile)), fill=(58, 58, 58))
+            np_mod = load_numpy()
+            if np_mod is not None:
+                tile = max(8, int(round(32 * render_scale)))
+                pattern = np_mod.full((tile * 2, tile * 2, 3), (38, 38, 38), dtype=np.uint8)
+                pattern[:tile, :tile] = (58, 58, 58)
+                pattern[tile:, tile:] = (58, 58, 58)
+                full = np_mod.tile(pattern, (math.ceil(render_h / (tile * 2)), math.ceil(render_w / (tile * 2)), 1))
+                preview = Image.fromarray(full[:render_h, :render_w], mode="RGB")
+            else:
+                preview = Image.new("RGB", (render_w, render_h), (38, 38, 38))
+                draw_bg = ImageDraw.Draw(preview)
+                tile = max(8, int(round(32 * render_scale)))
+                for y in range(0, render_h, tile):
+                    for x in range(0, render_w, tile):
+                        if ((x // tile) + (y // tile)) % 2 == 0:
+                            draw_bg.rectangle((x, y, min(render_w, x + tile), min(render_h, y + tile)), fill=(58, 58, 58))
         draw = ImageDraw.Draw(preview)
         for shape in shapes[1:]:
             color = [int(v) for v in shape.get("color", [])]
@@ -782,16 +979,34 @@ def draw_preview_ellipse_pillow(image, x, y, w, h, rot_deg, color, scale):
     y_max = min(height - 1, int(math.ceil(cy + extent_y + 1)))
     if x_min > x_max or y_min > y_max:
         return
-    pixels = image.load()
     r, g, b = color
-    for yy in range(y_min, y_max + 1):
-        dy = (float(yy) + 0.5) - cy
-        for xx in range(x_min, x_max + 1):
-            dx = (float(xx) + 0.5) - cx
-            xr = dx * cos_t + dy * sin_t
-            yr = -dx * sin_t + dy * cos_t
-            if xr * xr * inv_rx2 + yr * yr * inv_ry2 <= 1.0:
-                pixels[xx, yy] = (r, g, b)
+    np_mod = load_numpy()
+    if np_mod is not None:
+        from PIL import Image as _PIL_Image
+        bbox_h = y_max - y_min + 1
+        bbox_w = x_max - x_min + 1
+        yy, xx = np_mod.mgrid[0:bbox_h, 0:bbox_w]
+        dy = (yy.astype(np_mod.float64) + 0.5 + y_min) - cy
+        dx = (xx.astype(np_mod.float64) + 0.5 + x_min) - cx
+        xr = dx * cos_t + dy * sin_t
+        yr = -dx * sin_t + dy * cos_t
+        mask = xr * xr * inv_rx2 + yr * yr * inv_ry2 <= 1.0
+        if not mask.any():
+            return
+        bbox_region = image.crop((x_min, y_min, x_max + 1, y_max + 1))
+        bbox_arr = np_mod.array(bbox_region)
+        bbox_arr[yy[mask], xx[mask]] = (r, g, b)
+        image.paste(_PIL_Image.fromarray(bbox_arr, mode="RGB"), (x_min, y_min))
+    else:
+        pixels = image.load()
+        for yy in range(y_min, y_max + 1):
+            dy = (float(yy) + 0.5) - cy
+            for xx in range(x_min, x_max + 1):
+                dx = (float(xx) + 0.5) - cx
+                xr = dx * cos_t + dy * sin_t
+                yr = -dx * sin_t + dy * cos_t
+                if xr * xr * inv_rx2 + yr * yr * inv_ry2 <= 1.0:
+                    pixels[xx, yy] = (r, g, b)
 
 
 class App:
@@ -810,6 +1025,7 @@ class App:
         self.generation_lock = threading.Lock()
         self.generation_running = False
         self.current_generator_proc = None
+        self.active_generator_procs = set()
         self.eta_samples = deque(maxlen=ETA_MAX_PROGRESS_SAMPLES)
         self.eta_display_time = None
         self.eta_smoothed_seconds_per_layer = None
@@ -2140,13 +2356,19 @@ class App:
         mutated_samples = self._int_setting(setting, "mutatedSamples")
         max_resolution = self._int_setting(setting, "maxResolution")
         if random_samples >= 200000 or mutated_samples >= 8000 or max_resolution >= 2000:
-            self.queue.put((
-                "log",
+            msg = (
                 "High quality generation selected: "
                 f"layers={stop_at}, randomSamples={random_samples}, "
                 f"mutatedSamples={mutated_samples}, maxResolution={max_resolution}. "
-                "The first layer can take a long time before progress appears.",
-            ))
+                "The first layer can take a long time before progress appears."
+            )
+            if MAX_CONCURRENT_GENERATORS > 1:
+                msg += (
+                    f" Up to {MAX_CONCURRENT_GENERATORS} images will be processed "
+                    "concurrently. Reduce the quality preset or lower MAX_CONCURRENT_GENERATORS "
+                    "if you hit VRAM limits."
+                )
+            self.queue.put(("log", msg))
 
     def _generator_exit_message(self, returncode):
         if returncode in (3221225477, -1073741819):
@@ -2483,10 +2705,10 @@ class App:
             if not self.generation_running:
                 self.log_line(tr(self.lang, "no_generation_running"))
                 return
-            proc = self.current_generator_proc
+            procs = list(self.active_generator_procs)
         self.log_line(tr(self.lang, "stopping_generation"))
         self.shutdown_event.set()
-        if proc is not None:
+        for proc in procs:
             self._terminate_process(proc)
         self.status.set(tr(self.lang, "stopped"))
 
@@ -2522,142 +2744,135 @@ class App:
             self.stop_generate_button.config(state="normal")
         threading.Thread(target=self._generate_worker, args=(setting,), daemon=True).start()
 
+    def _read_gen_output(self, proc, output_queue):
+        try:
+            for raw_line in proc.stdout:
+                self._record_detail(f"GENERATOR RAW: {raw_line.rstrip()}")
+                output_queue.put(raw_line)
+        finally:
+            output_queue.put(None)
+
+    def _drain_gen_output(self, output_queue, last_generator_message):
+        while True:
+            try:
+                raw_line = output_queue.get_nowait()
+            except queue.Empty:
+                break
+            if raw_line is None:
+                continue
+            friendly = self.friendly_generator_line(raw_line)
+            last_generator_message = self.queue_generator_message(friendly, last_generator_message)
+        return last_generator_message
+
+    def _process_one_image(self, image_path, setting):
+        if self.shutdown_event.is_set():
+            return []
+        input_image = preprocess_input_image(image_path, setting)
+        if input_image != image_path:
+            self.queue.put(("log", f"Preprocessed image: {input_image}"))
+        before = {path.resolve() for path in generated_jsons(input_image)}
+        preview_path = generator_preview_path(input_image)
+        if preview_path.exists():
+            try:
+                preview_path.unlink()
+            except OSError:
+                pass
+        self.queue.put(("log", f"Generating: {image_path}"))
+        self.queue.put(("preview_file", image_path))
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        cmd = build_generator_command(input_image, setting)
+        self._record_detail(f"GENERATOR COMMAND: {self._format_command(cmd)}")
+        self.queue.put(("log", f"Running GPU generator"))
+        if self.shutdown_event.is_set():
+            return []
+        proc = self._popen_registered(
+            cmd,
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=flags,
+            env=build_generator_env(),
+        )
+        if proc is None:
+            return []
+        with self.generation_lock:
+            self.active_generator_procs.add(proc)
+        try:
+            output_queue = queue.Queue()
+            reader = threading.Thread(target=self._read_gen_output, args=(proc, output_queue), daemon=True)
+            reader.start()
+            last_preview = None
+            last_preview_mtime = None
+            last_generator_message = None
+            next_preview_scan = 0.0
+            next_json_scan = 0.0
+            while proc.poll() is None:
+                if self.shutdown_event.is_set():
+                    self._terminate_process(proc)
+                    return list(self._queue_generated_outputs(input_image, before))
+                last_generator_message = self._drain_gen_output(output_queue, last_generator_message)
+                now = time.monotonic()
+                if now >= next_preview_scan:
+                    next_preview_scan = now + GENERATOR_PREVIEW_SCAN_SECONDS
+                    preview_files = generated_preview_files(input_image)
+                    if preview_files:
+                        newest_preview = preview_files[0]
+                        preview_mtime = newest_preview.stat().st_mtime
+                        if preview_mtime != last_preview_mtime:
+                            last_preview_mtime = preview_mtime
+                            self.queue.put(("preview_file", newest_preview))
+                if now >= next_json_scan:
+                    next_json_scan = now + GENERATOR_JSON_SCAN_SECONDS
+                    newest = generated_jsons(input_image)
+                    if newest and newest[0] != last_preview:
+                        last_preview = newest[0]
+                time.sleep(GENERATOR_POLL_SLEEP_SECONDS)
+            if self.shutdown_event.is_set():
+                return []
+            reader.join(timeout=1)
+            last_generator_message = self._drain_gen_output(output_queue, last_generator_message)
+        finally:
+            self._unregister_process(proc)
+            with self.generation_lock:
+                self.active_generator_procs.discard(proc)
+        if proc.returncode != 0:
+            self._record_detail(f"GENERATOR EXIT: {proc.returncode}")
+            outputs = self._queue_generated_outputs(input_image, before)
+            for output in outputs:
+                self.queue.put(("log", tr(self.lang, "checkpoint_available_after_failure").format(path=output)))
+            if outputs:
+                self.queue.put(("render_lists", None))
+            self.queue.put(("log", self._generator_exit_message(proc.returncode)))
+            return []
+        self._record_detail("GENERATOR EXIT: 0")
+        new_outputs = self._queue_generated_outputs(input_image, before)
+        if not new_outputs:
+            self.queue.put(("log", "Generator finished but no JSON output was found."))
+            return []
+        for output in new_outputs:
+            preview_files = generated_preview_files(input_image)
+            if preview_files:
+                self.queue.put(("preview_file", preview_files[0]))
+            else:
+                self.queue.put(("preview_json", output))
+        return new_outputs
+
     def _generate_worker(self, setting):
         try:
             self.queue.put(("log", f"Selected profile: {setting['path'].name}"))
             self._log_generation_load_warning(setting)
-            for image_path in list(self.images):
-                if self.shutdown_event.is_set():
-                    self.queue.put(("status", tr(self.lang, "stopped")))
-                    return
-                self._reset_generation_eta()
-                input_image = preprocess_input_image(image_path, setting)
-                if input_image != image_path:
-                    self.queue.put(("log", f"Preprocessed image: {input_image}"))
-                before = {path.resolve() for path in generated_jsons(input_image)}
-                preview_path = generator_preview_path(input_image)
-                if preview_path.exists():
+            image_list = list(self.images)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_GENERATORS) as executor:
+                futures = [executor.submit(self._process_one_image, img, setting) for img in image_list]
+                for future in concurrent.futures.as_completed(futures):
                     try:
-                        preview_path.unlink()
-                    except OSError:
-                        pass
-                self.queue.put(("log", f"Generating: {image_path}"))
-                self.queue.put(("preview_file", image_path))
-                flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-                cmd = build_generator_command(input_image, setting)
-                self._record_detail(f"GENERATOR COMMAND: {self._format_command(cmd)}")
-                self.queue.put(("log", f"Running GPU generator with {setting['path'].name}"))
-                if self.shutdown_event.is_set():
-                    self.queue.put(("status", tr(self.lang, "stopped")))
-                    return
-                proc = self._popen_registered(
-                    cmd,
-                    cwd=ROOT,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    bufsize=1,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    creationflags=flags,
-                    env=build_generator_env(),
-                )
-                if proc is None:
-                    self.queue.put(("status", tr(self.lang, "stopped")))
-                    return
-                with self.generation_lock:
-                    self.current_generator_proc = proc
-
-                last_preview = None
-                last_preview_mtime = None
-                last_generator_message = None
-                output_queue = queue.Queue()
-
-                def _read_generator_output():
-                    try:
-                        for raw_line in proc.stdout:
-                            self._record_detail(f"GENERATOR RAW: {raw_line.rstrip()}")
-                            output_queue.put(raw_line)
-                    finally:
-                        output_queue.put(None)
-
-                reader = threading.Thread(target=_read_generator_output, daemon=True)
-                reader.start()
-
-                def _drain_generator_output():
-                    nonlocal last_generator_message
-                    while True:
-                        try:
-                            raw_line = output_queue.get_nowait()
-                        except queue.Empty:
-                            break
-                        if raw_line is None:
-                            continue
-                        friendly = self.friendly_generator_line(raw_line)
-                        last_generator_message = self.queue_generator_message(friendly, last_generator_message)
-
-                next_preview_scan = 0.0
-                next_json_scan = 0.0
-
-                try:
-                    while proc.poll() is None:
-                        if self.shutdown_event.is_set():
-                            self._terminate_process(proc)
-                            outputs = self._queue_generated_outputs(input_image, before)
-                            for output in outputs:
-                                self.queue.put(("log", tr(self.lang, "checkpoint_available_after_failure").format(path=output)))
-                            if outputs:
-                                self.queue.put(("render_lists", None))
-                            self.queue.put(("status", tr(self.lang, "stopped")))
-                            return
-                        _drain_generator_output()
-                        now = time.monotonic()
-                        if now >= next_preview_scan:
-                            next_preview_scan = now + GENERATOR_PREVIEW_SCAN_SECONDS
-                            preview_files = generated_preview_files(input_image)
-                            if preview_files:
-                                newest_preview = preview_files[0]
-                                preview_mtime = newest_preview.stat().st_mtime
-                                if preview_mtime != last_preview_mtime:
-                                    last_preview_mtime = preview_mtime
-                                    self.queue.put(("preview_file", newest_preview))
-                        if now >= next_json_scan:
-                            next_json_scan = now + GENERATOR_JSON_SCAN_SECONDS
-                            newest = generated_jsons(input_image)
-                            if newest and newest[0] != last_preview:
-                                last_preview = newest[0]
-                        time.sleep(GENERATOR_POLL_SLEEP_SECONDS)
-                    if self.shutdown_event.is_set():
-                        return
-                    reader.join(timeout=1)
-                    _drain_generator_output()
-                finally:
-                    self._unregister_process(proc)
-                    with self.generation_lock:
-                        if self.current_generator_proc is proc:
-                            self.current_generator_proc = None
-                if proc.returncode != 0:
-                    self._record_detail(f"GENERATOR EXIT: {proc.returncode}")
-                    outputs = self._queue_generated_outputs(input_image, before)
-                    for output in outputs:
-                        self.queue.put(("log", tr(self.lang, "checkpoint_available_after_failure").format(path=output)))
-                    if outputs:
-                        self.queue.put(("render_lists", None))
-                    self.queue.put(("log", self._generator_exit_message(proc.returncode)))
-                    self.queue.put(("status", tr(self.lang, "failed")))
-                    return
-                self._record_detail("GENERATOR EXIT: 0")
-                new_outputs = self._queue_generated_outputs(input_image, before)
-                if not new_outputs:
-                    self.queue.put(("log", "Generator finished but no JSON output was found."))
-                    self.queue.put(("status", tr(self.lang, "failed")))
-                    return
-                for output in new_outputs:
-                    preview_files = generated_preview_files(input_image)
-                    if preview_files:
-                        self.queue.put(("preview_file", preview_files[0]))
-                    else:
-                        self.queue.put(("preview_json", output))
+                        future.result()
+                    except Exception as exc:
+                        self.queue.put(("log", f"Image processing failed: {exc}"))
             self.queue.put(("render_lists", None))
             self.queue.put(("status", tr(self.lang, "done")))
         except Exception as exc:
@@ -3386,6 +3601,7 @@ class App:
                 with self.generation_lock:
                     self.generation_running = False
                     self.current_generator_proc = None
+                    self.active_generator_procs.clear()
                 if hasattr(self, "generate_button"):
                     self.generate_button.config(state="normal")
                 if hasattr(self, "stop_generate_button"):
