@@ -189,6 +189,86 @@ def render_preview(
     PILImage.fromarray(rgba, "RGBA").save(str(output_path), "PNG")
 
 
+def prune_shapes_for_region(
+    shapes: list[dict],
+    mask: "Image.Image",
+    width: int,
+    height: int,
+) -> tuple[list[dict], int]:
+    """Prune shapes based on a selection mask for region-focused painting.
+
+    Shapes that have *any* pixel inside the mask are kept.
+    Shapes completely outside the mask are deleted (they are irrelevant
+    to the current region pass).  No occlusion culling is performed.
+
+    Returns ``(pruned_shapes, num_kept_type16)``.
+    """
+    import math
+    from PIL import Image as PILImage
+
+    import numpy as np  # local import to avoid top-level dependency
+
+    # Convert PIL mask to numpy uint8 array (1 = inside selection).
+    mask_np = np.array(mask.resize((width, height), PILImage.NEAREST), dtype=np.uint8)
+    mask_bin = (mask_np > 0).astype(np.uint8)
+
+    keep = [False] * len(shapes)
+    keep[0] = True  # background shape always kept
+
+    for j in range(1, len(shapes)):
+        s = shapes[j]
+        if s.get("type", 0) != 16:
+            keep[j] = True
+            continue
+
+        data = s.get("data", [])
+        if len(data) < 5:
+            keep[j] = True
+            continue
+
+        cx, cy, rx, ry, rot_deg = data[:5]
+        if rx < 1:
+            rx = 1
+        if ry < 1:
+            ry = 1
+
+        theta = math.radians(rot_deg)
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+        inv_rx2 = 1.0 / (rx * rx)
+        inv_ry2 = 1.0 / (ry * ry)
+
+        x_min = max(0, int(cx - rx - 1))
+        x_max = min(width - 1, int(cx + rx + 1))
+        y_min = max(0, int(cy - ry - 1))
+        y_max = min(height - 1, int(cy + ry + 1))
+
+        has_pixels_in_mask = False
+
+        for py in range(y_min, y_max + 1):
+            row_mask = mask_bin[py, x_min:x_max + 1]
+            if not row_mask.any():
+                continue
+            for px_rel in np.where(row_mask)[0]:
+                px = x_min + int(px_rel)
+                dx = float(px) + 0.5 - cx
+                dy = float(py) + 0.5 - cy
+                xr = dx * cos_t + dy * sin_t
+                yr = -dx * sin_t + dy * cos_t
+                if xr * xr * inv_rx2 + yr * yr * inv_ry2 <= 1.0:
+                    has_pixels_in_mask = True
+                    break
+            if has_pixels_in_mask:
+                break
+
+        # Keep shapes that intersect the mask; delete those completely outside.
+        keep[j] = has_pixels_in_mask
+
+    pruned = [s for i, s in enumerate(shapes) if keep[i]]
+    num_type16 = sum(1 for s in pruned if s.get("type", 0) == 16)
+    return pruned, num_type16
+
+
 def load_shapes_from_json(json_path: str | Path) -> list[dict]:
     """Load the ``shapes`` list from a geometry JSON file."""
     with open(json_path, "r", encoding="utf-8") as fh:

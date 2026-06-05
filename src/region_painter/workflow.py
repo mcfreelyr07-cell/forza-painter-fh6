@@ -12,12 +12,11 @@ from typing import Callable
 
 from PIL import Image
 
-from PIL import Image
-
 from generator_backend import GENERATOR_EXE, parse_settings
 from region_painter.ini_manager import modify_ini
 from region_painter.preview_renderer import (
     load_shapes_from_json,
+    prune_shapes_for_region,
     render_preview,
     render_shapes_to_array,
 )
@@ -126,46 +125,42 @@ def prepare_region_pass(
     target_png = Path(state.target_path)
     pass_n = len(state.passes) + 1
     region_target = output_dir / f"region_target_pass{pass_n}.png"
-    # --- Solution 3: composite target image ---
-    # Render current accumulated shapes; non-selected region shows the
-    # rendered state (error=0 for exe), selected region shows original
-    # target (error≠0 → exe generates new shapes there).
-    # This keeps opaqueMask uniform (all 1s) → occlusion culling works.
+    # --- Prune shapes → masked target → resume from pruned ---
+    # 1. Prune shapes: keep those inside the mask; delete those outside.
+    # 2. Use transparent-masked target (exe only generates in mask region).
+    # 3. Resume from pruned json so exe only sees surviving shapes.
+    # 4. stopAt = num_pruned_type16 + region_layers.
     base_json = Path(state.base_json)
+    all_shapes = load_shapes_from_json(base_json) if base_json.exists() else []
+    if not all_shapes:
+        return {"error": "No accumulated shapes found."}
+    bg_data = all_shapes[0].get("data", [])
+    if len(bg_data) < 4:
+        return {"error": "Invalid background shape."}
+    working_w = int(bg_data[2])
+    working_h = int(bg_data[3])
+
+    # Prune shapes against the selection mask.
+    pruned, num_pruned = prune_shapes_for_region(
+        all_shapes, selection_mask, working_w, working_h,
+    )
+    new_stop_at = num_pruned + region_layers
+
+    # Save pruned shapes as the resume checkpoint.
+    pruned_json = output_dir / f"pruned_pass{pass_n}.json"
+    import json as _json
+    pruned_json.write_text(
+        _json.dumps({"shapes": pruned}, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    # Build masked target (transparent outside selection).
     try:
-        existing = load_shapes_from_json(base_json) if base_json.exists() else []
-        rendered = render_shapes_to_array(existing, target_png)
-        if rendered is None:
-            raise RuntimeError("cv2/numpy unavailable")
-        # Load original target as BGRA (preserve alpha for transparent pixels).
-        from utils import load_cv2
-        loaded = load_cv2()
-        if not loaded:
-            raise RuntimeError("cv2 unavailable")
-        _cv2_mod, np_mod = loaded
-        target_bgra = _cv2_mod.imread(str(target_png), _cv2_mod.IMREAD_UNCHANGED)
-        if target_bgra is None:
-            raise RuntimeError(f"Cannot read target: {target_png}")
-        has_alpha = target_bgra.shape[2] == 4
-        target_rgb = target_bgra[:, :, :3]
-        target_a = target_bgra[:, :, 3] if has_alpha else np_mod.full(
-            target_rgb.shape[:2], 255, dtype=np_mod.uint8,
-        )
-        h, w = target_rgb.shape[:2]
-        # Convert PIL 'L' mask to numpy, resize to match target dimensions.
-        mask_pil = selection_mask.resize((w, h), Image.NEAREST)
-        mask_np = np_mod.array(mask_pil, dtype=np_mod.float32) / 255.0
-        mask_np = np_mod.clip(mask_np, 0.0, 1.0)
-        mask_3ch = np_mod.stack([mask_np, mask_np, mask_np], axis=-1)
-        # Composite RGB: mask → target; 1-mask → rendered current.
-        composite_rgb = (target_rgb.astype(np_mod.float32) * mask_3ch +
-                         rendered.astype(np_mod.float32) * (1.0 - mask_3ch))
-        composite_rgb = composite_rgb.astype(np_mod.uint8)
-        # Alpha: use target's original alpha (transparent stays transparent).
-        composite = np_mod.dstack([composite_rgb, target_a])
-        _cv2_mod.imwrite(str(region_target), composite)
+        from region_painter.image_processor import apply_selection_mask
+        apply_selection_mask(target_png, selection_mask, region_target, feather_radius=0)
     except Exception as exc:
-        return {"error": f"Failed to build composite target: {exc}"}
+        return {"error": f"Failed to apply selection mask: {exc}"}
+
     mask_png = output_dir / f"pass_{pass_n}_mask.png"
     selection_mask.save(mask_png, "PNG")
     settings_path = Path(state._data.get("original_ini", ""))
@@ -186,34 +181,31 @@ def prepare_region_pass(
     used = state.used_layers
     filtered_save_at = [v for v in orig_save_at if v >= used]
     modify_ini(settings_path, temp_ini, stop_at=new_stop_at, save_at=filtered_save_at)
-    base_json = Path(state.base_json)
-    # Back up the accumulated shapes before the exe runs (exe may overwrite base_json).
+    # Back up the FULL original shapes (pre-pruning) for final merge.
     backup_json = output_dir / "_base_backup.json"
-    if base_json.exists():
-        import shutil
-        shutil.copy2(base_json, backup_json)
-    else:
-        backup_json.write_text('{"shapes":[]}', encoding="utf-8")
+    import shutil
+    shutil.copy2(base_json, backup_json)
 
-    cmd = [str(exe), str(region_target), "-resume", str(base_json),
+    cmd = [str(exe), str(region_target), "-resume", str(pruned_json),
            "-settings", str(temp_ini),
            "-preview", str(output_dir / "_exe_preview")]
-    _p(on_progress, f"Region pass: {region_layers} layers (stopAt={new_stop_at}, remaining={state.remaining_budget})")
+    _p(on_progress, f"Region pass: {region_layers} layers (pruned={num_pruned}, stopAt={new_stop_at}, remaining={state.remaining_budget})")
     return {"cmd": cmd, "output_dir": str(output_dir), "target_png": str(target_png),
             "preview_png": state.preview_path, "base_json": str(base_json),
-            "backup_json": str(backup_json),
+            "backup_json": str(backup_json), "pruned_json": str(pruned_json),
             "mask_png": str(mask_png), "new_stop_at": new_stop_at,
             "region_layers": region_layers, "state": state,
             "region_target_stem": region_target.stem,
-            "max_preview_size": state.max_preview_size}
+            "max_preview_size": state.max_preview_size,
+            "num_pruned": num_pruned}
 
 
 def finalize_region_pass(prep):
     """Post-process after region-pass exe finishes.
 
-    Without ``-output`` the exe writes accumulated shapes (old + new)
-    to a JSON named after the input image.  We use that output directly
-    — no merge with the backup is needed.
+    The exe ran with: pruned shapes → generated *region_layers* new shapes.
+    We extract the new shapes (last region_layers type-16 from the exe
+    output), merge them with the original full backup, and save.
     """
     import json
 
@@ -227,13 +219,13 @@ def finalize_region_pass(prep):
     max_preview_size = prep.get("max_preview_size", 500)
     region_target_stem = prep.get("region_target_stem", "")
     region_layers = prep.get("region_layers", 0)
+    num_pruned = prep.get("num_pruned", 0)
 
-    # Count old shapes from backup for accurate new_layers calculation.
-    old_shapes = load_shapes_from_json(backup_json) if backup_json.exists() else []
-    old_type16 = sum(1 for s in old_shapes if s.get("type") == 16)
+    # Load original full shapes from backup.
+    original = load_shapes_from_json(backup_json) if backup_json.exists() else []
 
-    # Find the exe's output (accumulated shapes: old + new).
-    accumulated: list[dict] = []
+    # Find the exe's output (pruned shapes + new shapes).
+    exe_output: list[dict] = []
     if region_target_stem:
         for c in sorted(
             output_dir.glob(f"{region_target_stem}*.json"),
@@ -242,41 +234,50 @@ def finalize_region_pass(prep):
             if c == backup_json:
                 continue
             try:
-                accumulated = load_shapes_from_json(c)
+                exe_output = load_shapes_from_json(c)
                 break
             except Exception:
                 pass
 
-    if not accumulated:
-        accumulated = old_shapes  # fallback
+    if not exe_output:
+        exe_output = original  # fallback
 
-    # Exe output already has all shapes — use it directly.
-    new_type16 = sum(1 for s in accumulated if s.get("type") == 16)
-    new_layers = max(0, new_type16 - old_type16)
+    # Extract new shapes: shapes at the end beyond the pruned count.
+    exe_type16 = [s for s in exe_output if s.get("type") == 16]
+    new_type16 = exe_type16[num_pruned:num_pruned + region_layers]
+
+    # Merge: original full shapes + extracted new shapes.
+    bg = original[0] if original else exe_output[0]
+    original_type16 = [s for s in original if s.get("type") == 16]
+    merged_type16 = original_type16 + new_type16
+    merged = [bg] + merged_type16
+
+    new_layers = len(new_type16)
     if new_layers == 0:
-        new_layers = region_layers  # safety floor
+        new_layers = region_layers
 
-    # Save accumulated result.
+    # Save merged result.
     base_json.write_text(
-        json.dumps({"shapes": accumulated}, indent=2, ensure_ascii=False),
+        json.dumps({"shapes": merged}, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
 
-    # Render preview — cv2 renderer (built-in exe-preview fallback)
+    # Render preview.
     try:
-        render_preview(target_png, accumulated, preview_png, max_preview_size)
+        render_preview(target_png, merged, preview_png, max_preview_size)
     except Exception:
         pass
 
     state.add_pass(mask_path=str(mask_png), layers=new_layers, json_path=str(base_json))
 
-    # Clean up backup.
-    try:
-        backup_json.unlink()
-    except OSError:
-        pass
+    # Clean up backup and pruned JSON.
+    for p in (backup_json, Path(prep.get("pruned_json", ""))):
+        try:
+            p.unlink()
+        except (OSError, TypeError):
+            pass
 
-    return {"ok": True, "new_total": new_type16, "preview_png": str(preview_png)}
+    return {"ok": True, "new_total": len(merged_type16), "preview_png": str(preview_png)}
 
 
 def get_status(output_dir):

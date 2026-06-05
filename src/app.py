@@ -1568,7 +1568,10 @@ class App:
         self.region_canvas.bind("<Double-Button-1>", self._region_canvas_double_click)
         self.region_canvas.bind("<Motion>", self._region_canvas_motion)
         self.region_canvas.bind("<Configure>", self._region_canvas_configure)
+        self.region_canvas_right.bind("<Configure>", self._region_canvas_configure)
 
+        if self.settings:
+            self._region_update_profile_description()  # sync stopAt → total budget
         self._region_update_button_states()
 
     # ==================================================================
@@ -1579,20 +1582,21 @@ class App:
         """Redraw the image/preview when canvases resize."""
         if self.region_workflow_running:
             return
-        preview = getattr(self, "_region_preview_showing", None)
-        if preview and Path(preview).exists():
-            if getattr(self, "_region_configure_job", None):
-                self.region_canvas_left.after_cancel(self._region_configure_job)
-            self._region_configure_job = self.region_canvas_left.after(
-                200, lambda: self._region_display_preview(Path(preview))
-            )
-            return
+        # Redraw original image on left canvas if an image is selected
         sel = self.region_image_list.curselection()
         if sel and sel[0] < len(self.region_images):
-            if getattr(self, "_region_configure_job", None):
-                self.region_canvas_left.after_cancel(self._region_configure_job)
-            self._region_configure_job = self.region_canvas_left.after(
+            if getattr(self, "_region_configure_image_job", None):
+                self.region_canvas_left.after_cancel(self._region_configure_image_job)
+            self._region_configure_image_job = self.region_canvas_left.after(
                 200, lambda: self._region_display_image(self.region_images[sel[0]])
+            )
+        # Redraw preview on right canvas if a preview is showing
+        preview = getattr(self, "_region_preview_showing", None)
+        if preview and Path(preview).exists():
+            if getattr(self, "_region_configure_preview_job", None):
+                self.region_canvas_right.after_cancel(self._region_configure_preview_job)
+            self._region_configure_preview_job = self.region_canvas_right.after(
+                200, lambda: self._region_display_preview(Path(preview))
             )
 
     # ==================================================================
@@ -4253,6 +4257,7 @@ class App:
                     if result.get("new_total"):
                         self.region_progress.set(f"Total layers: {result['new_total']}")
                     # Refresh pass history
+                    pass_label = "complete"
                     if self.region_current_output_dir:
                         try:
                             status = region_get_status(self.region_current_output_dir)
@@ -4264,9 +4269,18 @@ class App:
                                 else:
                                     label += " (first pass)"
                                 self.region_pass_list.insert(END, label)
+                            # Capture last pass info for logging
+                            passes = status.get("passes", [])
+                            if passes:
+                                last = passes[-1]
+                                pass_type = "region pass" if last.get("mask") else "first pass"
+                                pass_label = f"Pass #{len(passes)} {pass_type} complete — {last.get('layers', 0)} layers"
                             self.region_remaining_var.set(str(status.get("remaining", 0)))
                         except Exception:
                             pass
+                    self.log_line(f"Region Paint: {pass_label}")
+                    # Auto-clear mask first (same as pressing "Clear Mask" button)
+                    self._region_clear_mask()
                     # Show preview if available
                     preview_path = result.get("preview_path")
                     if not preview_path:
@@ -4275,11 +4289,10 @@ class App:
                         preview_path = Path(preview_path)
                     if preview_path.exists():
                         self._region_display_preview(preview_path)
-                    # Auto-clear mask after a successful region pass
-                    self._region_clear_mask()
                 else:
                     self.region_status.set(tr(self.lang, "failed"))
                     self.region_progress.set(result.get("error", "Unknown error"))
+                    self.log_line(f"Region Paint: failed — {result.get('error', 'Unknown error')}")
                 self._region_update_button_states()
             elif kind == "region_canvas_update":
                 self._region_display_image(payload)
