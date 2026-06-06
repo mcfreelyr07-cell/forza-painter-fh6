@@ -880,7 +880,6 @@ class App:
         self.region_tool = StringVar(value="rect")
         self.region_shapes: list[dict] = []
         self.region_brush_size = IntVar(value=15)
-        self.region_feather = IntVar(value=0)
         self.region_mask: "Image.Image | None" = None
         self.region_canvas_image_ref = None
         self.region_canvas_overlay_ref = None
@@ -1511,11 +1510,6 @@ class App:
             btn.pack(side=LEFT, padx=2)
             self.translated.append((btn, key, "text"))
         self._button(tool_row, "region_tool_clear", self._region_clear_mask).pack(side=LEFT, padx=(8, 2))
-        # Feather
-        feather_row = Frame(step3)
-        feather_row.pack(fill=X, padx=10, pady=(0, 8))
-        self._label(feather_row, "region_feather").pack(side=LEFT)
-        Spinbox(feather_row, from_=0, to=50, increment=1, width=5, textvariable=self.region_feather).pack(side=LEFT, padx=8)
 
         # Step 4 — Actions
         step4 = ttk.LabelFrame(left_outer, text=tr(self.lang, "region_step_actions"))
@@ -1787,10 +1781,6 @@ class App:
             scale = self._region_get_canvas_scale()
             from region_painter.image_processor import mask_from_canvas_shapes
             mask = mask_from_canvas_shapes(self.region_shapes, w, h, scale)
-            feather = self.region_feather.get()
-            if feather > 0:
-                from PIL import ImageFilter
-                mask = mask.filter(ImageFilter.GaussianBlur(radius=feather))
             return mask
         except Exception as e:
             self.log_line(f"Region Paint: mask generation failed: {e}")

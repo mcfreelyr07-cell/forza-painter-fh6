@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <code>v1.8.1</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>EXE de un solo archivo</code>
+  <code>v1.8.2</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>EXE de un solo archivo</code>
 </p>
 
 Convierte imágenes PNG/JPG/BMP en capas de Grupo de Vinilo para Forza Horizon 6. La aplicación integra la generación, la vista previa y la importación en una sola ventana de escritorio; los usuarios normales no necesitan Python, `.venv`, archivos batch ni direcciones de memoria manuales.
@@ -157,6 +157,10 @@ Estas carpetas pueden eliminarse cuando la app esté cerrada si quieres restable
 ## Changelog
 
 Aquí solo se conservan las entradas de versiones publicadas. Consulta [CHANGELOG.md](CHANGELOG.md) para ver el changelog que muestra el aviso de actualización de la app.
+### v1.8.2 / 2026-06-06
+
+- Se eliminó el control de Suavizado (Feather) de las herramientas de selección del Paso 3 en Pintura Regional. Las máscaras de selección ahora siempre tienen borde duro (0 suavizado), lo que corrige los problemas que el suavizado causaba en la función Pintar Región Seleccionada.
+
 ### v1.8.1 / 2026-06-05
 
 - Se agregó Pintura Regional (Region Paint) — un nuevo flujo de trabajo de pintura iterativa. Genere un pase de capas base en toda la imagen, luego seleccione regiones (usando herramientas de Rectángulo o Elipse) y refine solo esas áreas con capas adicionales. Incluye gestión de presupuesto de capas, historial de pases, lienzo de vista previa en vivo y exportación de JSON del resultado.

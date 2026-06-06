@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <code>v1.8.1</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>One-file EXE</code>
+  <code>v1.8.2</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>One-file EXE</code>
 </p>
 
 PNG/JPG/BMP 이미지를 Forza Horizon 6 비닐 그룹 레이어로 변환합니다. 앱에서 생성, 미리보기, 가져오기를 한 번에 처리하며 일반 사용자는 Python, `.venv`, 배치 파일, 메모리 주소 입력이 필요 없습니다.
@@ -156,6 +156,10 @@ EXE 옆에 생길 수 있는 외부 폴더:
 ## 변경 기록
 
 여기에는 버전 번호가 있는 릴리스만 남깁니다. 앱 업데이트 안내에 쓰이는 전체 기록은 [CHANGELOG.md](CHANGELOG.md)를 참고하세요.
+
+### v1.8.2 / 2026-06-06
+
+- 영역 페인트(Region Paint)의 3단계 선택 도구에서 페더(Feather) 컨트롤을 제거했습니다. 선택 마스크는 이제 항상 하드 엣지(0 페더)로 적용되어, 페더로 인해 선택 영역 페인트 기능이 비정상적으로 작동하던 문제를 수정했습니다.
 
 ### v1.8.1 / 2026-06-05
 

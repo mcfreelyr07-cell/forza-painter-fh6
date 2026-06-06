@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <code>v1.8.1</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>单文件 EXE</code>
+  <code>v1.8.2</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>单文件 EXE</code>
 </p>
 
 把 PNG/JPG/BMP 图片转换成 Forza Horizon 6 的 Vinyl Group 图层。软件内完成生成、预览和导入，普通用户不需要 Python、`.venv`、批处理文件，也不需要手动填写内存地址。
@@ -156,6 +156,10 @@ EXE 旁边可能出现这些外部文件夹：
 ## 更新日志
 
 这里仅保留带版本号的发布记录。用于软件更新弹窗的完整记录见 [CHANGELOG.md](CHANGELOG.md)。
+
+### v1.8.2 / 2026-06-06
+
+- 移除了区域绘制（Region Paint）第 3 步选择工具中的"羽化"控件。选择蒙版现在始终为硬边缘（0 羽化），修复了羽化导致"绘制选中区域"功能异常的问题。
 
 ### v1.8.1 / 2026-06-05
 
