@@ -15,12 +15,12 @@
 </p>
 
 <p align="center">
-  <code>v1.8.0</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>One-file EXE</code>
+  <code>v1.8.1</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>One-file EXE</code>
 </p>
 
 PNG/JPG/BMP 이미지를 Forza Horizon 6 비닐 그룹 레이어로 변환합니다. 앱에서 생성, 미리보기, 가져오기를 한 번에 처리하며 일반 사용자는 Python, `.venv`, 배치 파일, 메모리 주소 입력이 필요 없습니다.
 
-> **EXE 다운로드:** [Releases](https://github.com/bvzrays/forza-painter-fh6/releases)에서 `forza-painter-fh6-v1.8.0.exe`를 내려받아 바로 실행하세요.
+> **EXE 다운로드:** [Releases](https://github.com/bvzrays/forza-painter-fh6/releases)에서 `forza-painter-fh6-v1.8.1.exe`를 내려받아 바로 실행하세요.
 
 > **프리셋 마켓:** https://painter6.com 에서 공유 이미지, 프리셋, JSON 패키지를 둘러보거나 앱 안의 새 마켓 배너로 바로 열 수 있습니다.
 
@@ -39,7 +39,7 @@ PNG/JPG/BMP 이미지를 Forza Horizon 6 비닐 그룹 레이어로 변환합니
 
 ## 빠른 시작
 
-1. [Releases](https://github.com/bvzrays/forza-painter-fh6/releases)에서 `forza-painter-fh6-v1.8.0.exe`를 다운로드합니다.
+1. [Releases](https://github.com/bvzrays/forza-painter-fh6/releases)에서 `forza-painter-fh6-v1.8.1.exe`를 다운로드합니다.
 2. EXE를 쓰기 가능한 일반 폴더에 둡니다. 예: `Desktop\forza-painter-fh6`.
 3. EXE를 더블 클릭합니다. FH6 가져오기에서 Windows가 프로세스 접근을 막으면 관리자 권한으로 실행하세요.
 4. FH6에서 `Create Vinyl Group` / `Vinyl Group Editor`를 열고 sphere 템플릿을 불러온 뒤 `Ungroup`합니다.
@@ -105,6 +105,18 @@ PNG/JPG/BMP 이미지를 Forza Horizon 6 비닐 그룹 레이어로 변환합니
 
 FH는 커버 저장과 적용 범위를 위해 4개의 추가 경계 레이어가 필요합니다. 예: 1000 레이어 JSON에는 최소 1004 레이어 템플릿을 사용하는 것이 좋습니다.
 
+## 실험적 영역 페인트 (Region Paint)
+
+영역 페인트는 반복식 페인팅 워크플로로, 전체 이미지에 기본 레이어 패스를 먼저 생성한 후 사각형 또는 타원 도구로 영역을 선택하여 해당 영역에만 추가 세부 레이어를 적용합니다.
+
+- 단일 이미지를 추가하고, 품질 프로필을 선택하면(`stopAt`에 따라 총 예산이 설정됨) 첫 번째 패스 및 영역 레이어를 조정합니다.
+- `Start First Pass`를 클릭하여 기본 레이어를 생성합니다. 오른쪽 캔버스에 미리보기가 표시됩니다.
+- 왼쪽 캔버스에서 사각형 또는 타원 도구로 선택 영역을 그립니다. 빨간색 오버레이가 선택 영역을 표시합니다.
+- `Paint Selected Region`을 클릭하여 선택한 영역에만 추가 레이어를 추가합니다. 각 영역마다 반복할 수 있습니다.
+- 모든 패스가 끝나면 `Open Result Folder` 또는 `Save Result JSON`을 사용하여 최종 `base.json`을 얻습니다.
+- 일반 생성과 동일하게 `Import` 탭에서 결과 JSON을 가져옵니다.
+- 남은 예산은 `Remaining` 옆에 표시됩니다. 각 영역 패스마다 예산에서 레이어가 소비됩니다.
+
 ## 중요 규칙
 
 - 템플릿은 반드시 Ungroup되어 있어야 합니다.
@@ -144,6 +156,11 @@ EXE 옆에 생길 수 있는 외부 폴더:
 ## 변경 기록
 
 여기에는 버전 번호가 있는 릴리스만 남깁니다. 앱 업데이트 안내에 쓰이는 전체 기록은 [CHANGELOG.md](CHANGELOG.md)를 참고하세요.
+
+### v1.8.1 / 2026-06-05
+
+- 영역 페인트(Region Paint) 추가 — 새로운 반복식 페인팅 워크플로. 전체 이미지에 기본 레이어 패스를 생성한 후, 사각형 또는 타원 도구로 영역을 선택하여 해당 영역에만 추가 레이어를 세부 조정할 수 있습니다. 레이어 예산 관리, 패스 기록, 실시간 미리보기 캔버스, 결과 JSON 내보내기를 포함합니다.
+- 창 하단의 로그 영역이 Notebook 탭에 의해 부분적으로 가려지는 문제를 수정했습니다.
 
 ### v1.8.0 / 2026-06-01
 

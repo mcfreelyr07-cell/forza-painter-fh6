@@ -15,12 +15,12 @@
 </p>
 
 <p align="center">
-  <code>v1.8.0</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>单文件 EXE</code>
+  <code>v1.8.1</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>单文件 EXE</code>
 </p>
 
 把 PNG/JPG/BMP 图片转换成 Forza Horizon 6 的 Vinyl Group 图层。软件内完成生成、预览和导入，普通用户不需要 Python、`.venv`、批处理文件，也不需要手动填写内存地址。
 
-> **下载 EXE：** 从 [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) 下载 `forza-painter-fh6-v1.8.0.exe`，直接运行。
+> **下载 EXE：** 从 [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) 下载 `forza-painter-fh6-v1.8.1.exe`，直接运行。
 
 > **预设市场：** 可以在 https://painter6.com 浏览玩家分享的图片、预设和 JSON 包，也可以通过软件内的新市场横幅直接打开。
 
@@ -39,7 +39,7 @@
 
 ## 快速开始
 
-1. 从 [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) 下载 `forza-painter-fh6-v1.8.0.exe`。
+1. 从 [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) 下载 `forza-painter-fh6-v1.8.1.exe`。
 2. 把 EXE 放在普通可写目录里，例如 `Desktop\forza-painter-fh6`。
 3. 双击 EXE 启动。导入 FH6 时如果被 Windows 拦截进程访问，请用管理员身份运行 EXE。
 4. 在游戏里进入 `Create Vinyl Group` / `Vinyl Group Editor`，加载球形模板并 `Ungroup`。
@@ -105,6 +105,18 @@
 
 FH 需要额外 4 个边界层来正确保存封面和贴车范围。例如：1000 层 JSON 建议使用至少 1004 层模板；3000 层模板实际可导入约 2996 个可绘制图形。
 
+## 实验性区域绘制 (Region Paint)
+
+区域绘制是一种迭代式绘画工作流，先生成全图基础图层，然后使用矩形或椭圆工具选择区域，仅对选中区域添加额外的细化图层。
+
+- 添加单张图片，选择质量预设（将根据 `stopAt` 自动设置总预算），调整首轮和区域图层数量。
+- 点击 `Start First Pass` 生成基础图层。预览将显示在右侧画布上。
+- 在左侧画布上使用矩形或椭圆工具绘制选择区域。红色叠加层显示当前选区。
+- 点击 `Paint Selected Region` 仅对所选区域添加更多图层。可重复操作每个区域。
+- 所有轮次完成后，使用 `Open Result Folder` 或 `Save Result JSON` 获取最终的 `base.json`。
+- 使用 `Import` 页面导入结果 JSON —— 与标准生成流程相同。
+- 剩余预算显示在 `Remaining` 旁边。每次区域绘制都会消耗预算中的图层数。
+
 ## 必须注意
 
 - 模板必须已经 Ungroup。
@@ -144,6 +156,11 @@ EXE 旁边可能出现这些外部文件夹：
 ## 更新日志
 
 这里仅保留带版本号的发布记录。用于软件更新弹窗的完整记录见 [CHANGELOG.md](CHANGELOG.md)。
+
+### v1.8.1 / 2026-06-05
+
+- 新增区域绘制（Region Paint）—— 全新的迭代式绘画工作流。首先生成全图基础图层，然后使用矩形或椭圆工具选择区域，仅对选中区域添加额外的细化图层。包含图层预算管理、轮次历史、实时预览画布和结果 JSON 导出。
+- 修复了底部日志区域被 Notebook 标签页部分遮挡的问题。
 
 ### v1.8.0 / 2026-06-01
 
