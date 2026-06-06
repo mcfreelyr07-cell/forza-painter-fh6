@@ -2227,7 +2227,8 @@ class App:
                 self.queue.put(("region_done", {"ok": False, "error": f"Exit code {proc.returncode}"}))
                 return
 
-            result = finalize_first_pass(prep)
+            self.queue.put(("region_progress", "Rendering preview..."))
+            result = finalize_first_pass(prep, on_progress=on_progress)
             result["preview_path"] = prep.get("preview_png", "")
             self.queue.put(("region_done", result))
         except Exception as e:
@@ -2362,7 +2363,8 @@ class App:
                 self.queue.put(("region_done", {"ok": False, "error": f"Exit code {proc.returncode}"}))
                 return
 
-            result = finalize_region_pass(prep)
+            self.queue.put(("region_progress", "Rendering preview..."))
+            result = finalize_region_pass(prep, on_progress=on_progress)
             result["preview_path"] = prep.get("preview_png", "")
             self.queue.put(("region_done", result))
         except Exception as e:

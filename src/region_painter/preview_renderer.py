@@ -200,6 +200,7 @@ def render_preview_high_quality(
     shapes: list[dict],
     output_path: str | Path,
     max_preview_size: int = 500,
+    on_progress=None,
 ) -> None:
     """Render shapes with sub-pixel float32 RGBA blending (matches Go generator).
 
@@ -236,8 +237,14 @@ def render_preview_high_quality(
             canvas[:, :, 2] = int(bg_color[2]) / 255.0
             canvas[:, :, 3] = int(bg_color[3]) / 255.0
 
+    # Precompute the coordinate grid ONCE for all shapes.
+    yy, xx = np.mgrid[:image_h, :image_w]
+    fx = xx.astype(np.float32) + 0.5
+    fy = yy.astype(np.float32) + 0.5
+
+    total = len(shapes) - 1
     # Draw each shape with sub-pixel float32 alpha blending.
-    for shape in shapes[1:]:
+    for idx, shape in enumerate(shapes[1:]):
         color = shape.get("color", [])
         if len(color) < 4 or int(color[3]) <= 0:
             continue
@@ -248,7 +255,7 @@ def render_preview_high_quality(
         shape_type = int(shape["type"])
         data = shape["data"]
 
-        mask = _make_shape_mask_f32(shape_type, data, image_w, image_h)
+        mask = _eval_shape_mask(shape_type, data, fx, fy)
         if mask is None:
             continue
 
@@ -258,6 +265,9 @@ def render_preview_high_quality(
         canvas[mask, 1] = canvas[mask, 1] * inv_a + g * a
         canvas[mask, 2] = canvas[mask, 2] * inv_a + b * a
         canvas[mask, 3] = canvas[mask, 3] * inv_a + a
+
+        if on_progress and (idx % 100 == 0 or idx == total - 1):
+            on_progress(f"Rendering preview... {idx + 1}/{total}")
 
     # Convert back to uint8 RGBA.
     result = (np.clip(canvas * 255.0, 0, 255)).astype(np.uint8)
@@ -281,10 +291,13 @@ def render_preview_high_quality(
 def _make_shape_mask_f32(shape_type: int, data: list, w: int, h: int):
     """Generate a boolean mask for a shape with sub-pixel precision."""
     yy, xx = np.mgrid[:h, :w]
-    # +0.5 sub-pixel offset — matches Go generator's x+0.5 / y+0.5
     fx = xx.astype(np.float32) + 0.5
     fy = yy.astype(np.float32) + 0.5
+    return _eval_shape_mask(shape_type, data, fx, fy)
 
+
+def _eval_shape_mask(shape_type: int, data: list, fx: "np.ndarray", fy: "np.ndarray"):
+    """Evaluate shape containment on a precomputed coordinate grid."""
     if shape_type == 1:  # Rectangle
         x, y, sw, sh = [float(v) for v in data]
         return (fx >= x - sw / 2.0) & (fx <= x + sw / 2.0) & (fy >= y - sh / 2.0) & (fy <= y + sh / 2.0)

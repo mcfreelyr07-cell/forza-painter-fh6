@@ -78,7 +78,7 @@ def prepare_first_pass(
             "total_budget": total_budget, "max_preview_size": max_preview_size, "state": state}
 
 
-def finalize_first_pass(prep):
+def finalize_first_pass(prep, on_progress=None):
     """Post-process after first-pass exe finishes."""
     output_dir = Path(prep["output_dir"])
     base_json = Path(prep["base_json"])
@@ -95,8 +95,9 @@ def finalize_first_pass(prep):
         shutil.copy2(actual_json, base_json)
     shapes = load_shapes_from_json(base_json)
     layers = max(0, len(shapes) - 1)
+    _p(on_progress, f"Rendering preview for {layers} shapes...")
     try:
-        render_preview_high_quality(target_png, shapes, preview_png, max_preview_size)
+        render_preview_high_quality(target_png, shapes, preview_png, max_preview_size, on_progress=on_progress)
     except Exception:
         pass
     state.base_json = str(base_json)
@@ -200,7 +201,7 @@ def prepare_region_pass(
             "num_pruned": num_pruned}
 
 
-def finalize_region_pass(prep):
+def finalize_region_pass(prep, on_progress=None):
     """Post-process after region-pass exe finishes.
 
     The exe ran with: pruned shapes → generated *region_layers* new shapes.
@@ -263,8 +264,10 @@ def finalize_region_pass(prep):
     )
 
     # Render preview.
+    total_shapes = len(merged_type16)
+    _p(on_progress, f"Rendering preview for {total_shapes} shapes...")
     try:
-        render_preview_high_quality(target_png, merged, preview_png, max_preview_size)
+        render_preview_high_quality(target_png, merged, preview_png, max_preview_size, on_progress=on_progress)
     except Exception:
         pass
 
