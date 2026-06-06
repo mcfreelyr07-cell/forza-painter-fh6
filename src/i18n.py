@@ -162,7 +162,6 @@ Region Paint lets you iteratively refine specific areas of an image. Instead of 
 Tips
 
 - The remaining budget is shown next to Remaining. Each region pass consumes layers from this budget.
-- Feather controls how soft the selection edge blends into the surrounding area.
 - You can run multiple region passes on the same area for extra refinement.
 """,
         "region_paint_tab": "Region Paint",
@@ -180,13 +179,14 @@ Tips
         "region_tool_polygon": "Polygon",
         "region_tool_clear": "Clear mask",
         "region_brush_size": "Brush size",
-        "region_feather": "Feather",
         "region_start_first_pass": "Start First Pass",
         "region_paint_region": "Paint Selected Region",
         "region_stop": "Stop",
         "region_pass_history": "Pass History",
         "region_original_label": "Original",
         "region_preview_label": "Preview",
+        "region_preview_tab": "Preview",
+        "region_heatmap_tab": "Heatmap",
         "region_no_image": "Please add an image first.",
         "region_no_mask": "Please select a region first.",
         "region_budget_exceeded": "Not enough remaining layers ({remaining} left, need {needed}).",
@@ -354,7 +354,6 @@ A Pintura Regional permite refinar iterativamente áreas específicas de uma ima
 Dicas
 
 - O orçamento restante é mostrado ao lado de Restante. Cada passagem regional consome camadas deste orçamento.
-- Suavização controla o quão suave a borda da seleção se mescla com a área ao redor.
 - Você pode executar várias passagens regionais na mesma área para refinamento extra.
 """,
         "region_paint_tab": "Pintura Regional",
@@ -372,13 +371,14 @@ Dicas
         "region_tool_polygon": "Polígono",
         "region_tool_clear": "Limpar máscara",
         "region_brush_size": "Tamanho do pincel",
-        "region_feather": "Suavização",
         "region_start_first_pass": "Iniciar 1ª Passagem",
         "region_paint_region": "Pintar Região Selecionada",
         "region_stop": "Parar",
         "region_pass_history": "Histórico",
         "region_original_label": "Original",
         "region_preview_label": "Pré-visualização",
+        "region_preview_tab": "Pré-visualização",
+        "region_heatmap_tab": "Mapa de calor",
         "region_no_image": "Adicione uma imagem primeiro.",
         "region_no_mask": "Selecione uma região primeiro.",
         "region_budget_exceeded": "Camadas restantes insuficientes ({remaining} restam, {needed} necessárias).",
@@ -546,7 +546,6 @@ Dicas
 提示
 
 - 剩余预算显示在"剩余"旁边。每个区域轮次都会消耗此预算中的图层。
-- 羽化控制选择边缘与周围区域混合的柔和程度。
 - 你可以在同一区域运行多个区域轮次以获得额外的细化效果。
 """,
         "region_paint_tab": "区域绘制",
@@ -564,13 +563,14 @@ Dicas
         "region_tool_polygon": "多边形",
         "region_tool_clear": "清除蒙版",
         "region_brush_size": "画笔大小",
-        "region_feather": "羽化",
         "region_start_first_pass": "开始首轮生成",
         "region_paint_region": "绘制选中区域",
         "region_stop": "停止",
         "region_pass_history": "轮次历史",
         "region_original_label": "原图",
         "region_preview_label": "预览",
+        "region_preview_tab": "预览",
+        "region_heatmap_tab": "热力图",
         "region_no_image": "请先添加一张图片。",
         "region_no_mask": "请先选择一个区域。",
         "region_budget_exceeded": "剩余图层不足（剩余 {remaining}，需要 {needed}）。",
@@ -738,7 +738,6 @@ Dicas
 提示
 
 - 剩餘預算顯示在「剩餘」旁邊。每個區域輪次都會消耗此預算中的圖層。
-- 羽化控制選擇邊緣與周圍區域混合的柔和程度。
 - 你可以在同一區域執行多個區域輪次以獲得額外的細化效果。
 """,
         "region_paint_tab": "區域繪製",
@@ -756,13 +755,14 @@ Dicas
         "region_tool_polygon": "多邊形",
         "region_tool_clear": "清除遮罩",
         "region_brush_size": "畫筆大小",
-        "region_feather": "羽化",
         "region_start_first_pass": "開始首輪產生",
         "region_paint_region": "繪製選中區域",
         "region_stop": "停止",
         "region_pass_history": "輪次歷史",
         "region_original_label": "原圖",
         "region_preview_label": "預覽",
+        "region_preview_tab": "預覽",
+        "region_heatmap_tab": "熱力圖",
         "region_no_image": "請先新增一張圖片。",
         "region_no_mask": "請先選擇一個區域。",
         "region_budget_exceeded": "剩餘圖層不足（剩餘 {remaining}，需要 {needed}）。",
@@ -930,7 +930,6 @@ Dicas
 팁
 
 - 남은 예산은 남음 옆에 표시됩니다. 각 영역 패스는 이 예산에서 레이어를 소비합니다.
-- 페더는 선택 가장자리가 주변 영역과 얼마나 부드럽게 혼합되는지 제어합니다.
 - 동일한 영역에서 여러 번의 영역 패스를 실행하여 추가 세부 조정을 할 수 있습니다.
 """,
         "region_paint_tab": "영역 페인트",
@@ -948,13 +947,14 @@ Dicas
         "region_tool_polygon": "다각형",
         "region_tool_clear": "마스크 지우기",
         "region_brush_size": "브러시 크기",
-        "region_feather": "페더",
         "region_start_first_pass": "첫 패스 시작",
         "region_paint_region": "선택 영역 페인트",
         "region_stop": "중지",
         "region_pass_history": "패스 기록",
         "region_original_label": "원본",
         "region_preview_label": "미리보기",
+        "region_preview_tab": "미리보기",
+        "region_heatmap_tab": "히트맵",
         "region_no_image": "먼저 이미지를 추가하세요.",
         "region_no_mask": "먼저 영역을 선택하세요.",
         "region_budget_exceeded": "남은 레이어가 부족합니다 ({remaining}개 남음, {needed}개 필요).",
@@ -1121,7 +1121,6 @@ La Pintura Regional permite refinar iterativamente áreas específicas de una im
 Consejos
 
 - El presupuesto restante se muestra junto a Restante. Cada pasada regional consume capas de este presupuesto.
-- Suavizado controla qué tan suave se mezcla el borde de la selección con el área circundante.
 - Puede ejecutar múltiples pasadas regionales en la misma área para un refinamiento adicional.
 """,
         "region_paint_tab": "Pintura Regional",
@@ -1139,13 +1138,14 @@ Consejos
         "region_tool_polygon": "Polígono",
         "region_tool_clear": "Limpiar máscara",
         "region_brush_size": "Tamaño del pincel",
-        "region_feather": "Suavizado",
         "region_start_first_pass": "Iniciar 1ª Pasada",
         "region_paint_region": "Pintar Región Seleccionada",
         "region_stop": "Detener",
         "region_pass_history": "Historial",
         "region_original_label": "Original",
         "region_preview_label": "Vista previa",
+        "region_preview_tab": "Vista previa",
+        "region_heatmap_tab": "Mapa de calor",
         "region_no_image": "Agregue una imagen primero.",
         "region_no_mask": "Seleccione una región primero.",
         "region_budget_exceeded": "No hay suficientes capas restantes ({remaining} restantes, se necesitan {needed}).",

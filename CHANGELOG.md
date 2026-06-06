@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.8.3 / 2026-06-06
+
+- Added a **Heatmap** tab to the Region Paint right canvas. After each pass (First Pass / Paint Selected Region) a shape-density heatmap is automatically generated from the geometry JSON and displayed alongside the rendered preview. The two tabs share a cache so switching is instant.
+- Significantly improved Region Paint preview image generation speed.
+
+## v1.8.2 / 2026-06-06
+
+- Removed the Feather control from the Region Paint tab's Step 3 selection tools. The feather (Gaussian blur) on selection masks was causing issues with the Paint Selected Region feature. Selection masks are now always hard-edged (0 feather) for reliable region painting.
+
 ## v1.8.1 / 2026-06-05
 
 - Added Region Paint — a new iterative painting workflow that generates a base layer pass across the whole image, then lets you select regions (using Rectangle or Ellipse tools) and refine only those areas with additional layers. Includes layer budget management, pass history tracking, live preview on a dedicated right canvas, and result JSON export.

@@ -28,6 +28,11 @@ from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, X, Button, Canvas, Checkbutt
 import psutil
 
 from app_paths import ROOT
+
+# Allow importing from project-root packages (e.g. scripts/)
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from fh6_vinyl_resources import load_vinyl_polygons
 from game_profiles import PROFILES
 from geometry_json import RECTANGLE, ROTATED_ELLIPSE, load_normalized_geometry
@@ -1096,7 +1101,6 @@ class App:
         self.region_tool = StringVar(value="rect")
         self.region_shapes: list[dict] = []
         self.region_brush_size = IntVar(value=15)
-        self.region_feather = IntVar(value=0)
         self.region_mask: "Image.Image | None" = None
         self.region_canvas_image_ref = None
         self.region_canvas_overlay_ref = None
@@ -1109,6 +1113,10 @@ class App:
         self.region_workflow_running = False
         self.region_status = StringVar(value="Ready")
         self.region_progress = StringVar(value="")
+        # Heatmap tab state
+        self._region_right_tab: str = "preview"
+        self.region_heatmap_ref = None
+        self._region_heatmap_showing: str = ""
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.refresh_processes()
@@ -1727,11 +1735,6 @@ class App:
             btn.pack(side=LEFT, padx=2)
             self.translated.append((btn, key, "text"))
         self._button(tool_row, "region_tool_clear", self._region_clear_mask).pack(side=LEFT, padx=(8, 2))
-        # Feather
-        feather_row = Frame(step3)
-        feather_row.pack(fill=X, padx=10, pady=(0, 8))
-        self._label(feather_row, "region_feather").pack(side=LEFT)
-        Spinbox(feather_row, from_=0, to=50, increment=1, width=5, textvariable=self.region_feather).pack(side=LEFT, padx=8)
 
         # Step 4 — Actions
         step4 = ttk.LabelFrame(left_outer, text=tr(self.lang, "region_step_actions"))
@@ -1772,7 +1775,25 @@ class App:
         canvas_label_row = Frame(right)
         canvas_label_row.pack(fill=X)
         self._label(canvas_label_row, "region_original_label", anchor="w").pack(side=LEFT, expand=True, fill=X)
-        self._label(canvas_label_row, "region_preview_label", anchor="w").pack(side=LEFT, expand=True, fill=X)
+        # Tab bar replacing static "Preview" label
+        tab_row = Frame(canvas_label_row, bg=self._parent_bg(canvas_label_row))
+        tab_row.pack(side=LEFT, expand=True, fill=X)
+        self.region_tab_preview_btn = Label(
+            tab_row, text=tr(self.lang, "region_preview_tab"), anchor="w",
+            bg=Theme.INPUT, fg=Theme.TEXT, padx=8, pady=2,
+            cursor="hand2",
+        )
+        self.region_tab_preview_btn.pack(side=LEFT)
+        self.region_tab_preview_btn.bind("<Button-1>", lambda e: self._region_switch_tab("preview"))
+        self.region_tab_heatmap_btn = Label(
+            tab_row, text=tr(self.lang, "region_heatmap_tab"), anchor="w",
+            bg=Theme.BUTTON, fg=Theme.MUTED, padx=8, pady=2,
+            cursor="arrow",
+        )
+        self.region_tab_heatmap_btn.pack(side=LEFT)
+        self.region_tab_heatmap_btn.bind("<Button-1>", lambda e: self._region_switch_tab("heatmap"))
+        self.translated.append((self.region_tab_preview_btn, "region_preview_tab", "text"))
+        self.translated.append((self.region_tab_heatmap_btn, "region_heatmap_tab", "text"))
         # Canvases side by side
         canvas_row = Frame(right)
         canvas_row.pack(fill=BOTH, expand=True, pady=6)
@@ -1811,14 +1832,23 @@ class App:
             self._region_configure_image_job = self.region_canvas_left.after(
                 200, lambda: self._region_display_image(self.region_images[0])
             )
-        # Redraw preview on right canvas if a preview is showing
-        preview = getattr(self, "_region_preview_showing", None)
-        if preview and Path(preview).exists():
-            if getattr(self, "_region_configure_preview_job", None):
-                self.region_canvas_right.after_cancel(self._region_configure_preview_job)
-            self._region_configure_preview_job = self.region_canvas_right.after(
-                200, lambda: self._region_display_preview(Path(preview))
-            )
+        # Redraw right canvas based on active tab
+        if self._region_right_tab == "heatmap":
+            heatmap = getattr(self, "_region_heatmap_showing", None)
+            if heatmap and Path(heatmap).exists():
+                if getattr(self, "_region_configure_heatmap_job", None):
+                    self.region_canvas_right.after_cancel(self._region_configure_heatmap_job)
+                self._region_configure_heatmap_job = self.region_canvas_right.after(
+                    200, lambda: self._region_display_heatmap(Path(heatmap))
+                )
+        else:
+            preview = getattr(self, "_region_preview_showing", None)
+            if preview and Path(preview).exists():
+                if getattr(self, "_region_configure_preview_job", None):
+                    self.region_canvas_right.after_cancel(self._region_configure_preview_job)
+                self._region_configure_preview_job = self.region_canvas_right.after(
+                    200, lambda: self._region_display_preview(Path(preview))
+                )
 
     # ==================================================================
     # Region Paint — Image management
@@ -2003,10 +2033,6 @@ class App:
             scale = self._region_get_canvas_scale()
             from region_painter.image_processor import mask_from_canvas_shapes
             mask = mask_from_canvas_shapes(self.region_shapes, w, h, scale)
-            feather = self.region_feather.get()
-            if feather > 0:
-                from PIL import ImageFilter
-                mask = mask.filter(ImageFilter.GaussianBlur(radius=feather))
             return mask
         except Exception as e:
             self.log_line(f"Region Paint: mask generation failed: {e}")
@@ -2026,6 +2052,13 @@ class App:
         self.region_stop_btn.config(state="normal" if running else "disabled")
         self.region_open_folder_btn.config(state="normal" if has_output and not running else "disabled")
         self.region_save_json_btn.config(state="normal" if has_output and not running else "disabled")
+        # Heatmap tab: only clickable when a heatmap exists
+        has_heatmap = bool(self._region_heatmap_showing)
+        if self.region_tab_heatmap_btn:
+            if has_heatmap or self._region_right_tab == "heatmap":
+                self.region_tab_heatmap_btn.config(cursor="hand2")
+            else:
+                self.region_tab_heatmap_btn.config(cursor="arrow")
         # Update remaining from saved state if available, else from entries
         if self.region_current_output_dir:
             try:
@@ -2230,6 +2263,16 @@ class App:
             self.queue.put(("region_progress", "Rendering preview..."))
             result = finalize_first_pass(prep, on_progress=on_progress)
             result["preview_path"] = prep.get("preview_png", "")
+            # Generate heatmap from the resulting geometry JSON
+            try:
+                base_json = Path(prep["base_json"])
+                if base_json.exists():
+                    heatmap_png = base_json.parent / "heatmap.png"
+                    from scripts.heatmap import generate_standalone_heatmap
+                    generate_standalone_heatmap(base_json, heatmap_png)
+                    result["heatmap_path"] = str(heatmap_png)
+            except Exception as hm_err:
+                self.queue.put(("region_log", f"Heatmap generation skipped: {hm_err}"))
             self.queue.put(("region_done", result))
         except Exception as e:
             self.queue.put(("region_status", tr(self.lang, "failed")))
@@ -2366,6 +2409,16 @@ class App:
             self.queue.put(("region_progress", "Rendering preview..."))
             result = finalize_region_pass(prep, on_progress=on_progress)
             result["preview_path"] = prep.get("preview_png", "")
+            # Generate heatmap from the resulting geometry JSON
+            try:
+                base_json = Path(prep["base_json"])
+                if base_json.exists():
+                    heatmap_png = base_json.parent / "heatmap.png"
+                    from scripts.heatmap import generate_standalone_heatmap
+                    generate_standalone_heatmap(base_json, heatmap_png)
+                    result["heatmap_path"] = str(heatmap_png)
+            except Exception as hm_err:
+                self.queue.put(("region_log", f"Heatmap generation skipped: {hm_err}"))
             self.queue.put(("region_done", result))
         except Exception as e:
             self.queue.put(("region_status", tr(self.lang, "failed")))
@@ -2396,6 +2449,56 @@ class App:
             self._region_preview_showing = str(preview_path)
         except Exception:
             pass
+
+    def _region_display_heatmap(self, heatmap_path: Path):
+        """Display a heatmap image on the RIGHT region canvas."""
+        try:
+            from PIL import Image, ImageTk
+            img = Image.open(heatmap_path).convert("RGB")
+            cw = self.region_canvas_right.winfo_width() or 300
+            ch = self.region_canvas_right.winfo_height() or 500
+            display_size = min(cw - 4, ch - 4, 600)
+            ratio = display_size / max(img.width, img.height)
+            new_w = max(1, int(img.width * ratio))
+            new_h = max(1, int(img.height * ratio))
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+            self.region_heatmap_ref = ImageTk.PhotoImage(img)
+            self.region_canvas_right.delete("all")
+            self.region_canvas_right.create_image(2, 2, anchor="nw", image=self.region_heatmap_ref)
+            self._region_heatmap_showing = str(heatmap_path)
+        except Exception:
+            pass
+
+    def _region_switch_tab(self, tab_name: str):
+        """Switch the right-canvas tab between 'preview' and 'heatmap'."""
+        if self.region_workflow_running:
+            return
+        if tab_name == self._region_right_tab:
+            return
+        # Prevent switching to heatmap if no heatmap exists yet
+        if tab_name == "heatmap" and not self._region_heatmap_showing:
+            return
+        self._region_right_tab = tab_name
+        # Update button styles
+        if tab_name == "preview":
+            self.region_tab_preview_btn.config(bg=Theme.INPUT, fg=Theme.TEXT)
+            self.region_tab_heatmap_btn.config(
+                bg=Theme.BUTTON,
+                fg=Theme.TEXT if self._region_heatmap_showing else Theme.MUTED,
+            )
+            preview = getattr(self, "_region_preview_showing", None)
+            if preview and Path(preview).exists():
+                self._region_display_preview(Path(preview))
+            else:
+                self.region_canvas_right.delete("all")
+        else:  # heatmap
+            self.region_tab_heatmap_btn.config(bg=Theme.INPUT, fg=Theme.TEXT)
+            self.region_tab_preview_btn.config(bg=Theme.BUTTON, fg=Theme.TEXT)
+            heatmap = getattr(self, "_region_heatmap_showing", None)
+            if heatmap and Path(heatmap).exists():
+                self._region_display_heatmap(Path(heatmap))
+            else:
+                self.region_canvas_right.delete("all")
 
     def _build_import_tab(self):
         self._build_market_banner(self.import_tab)
@@ -4509,7 +4612,23 @@ class App:
                     else:
                         preview_path = Path(preview_path)
                     if preview_path.exists():
-                        self._region_display_preview(preview_path)
+                        if self._region_right_tab == "preview":
+                            self._region_display_preview(preview_path)
+                        else:
+                            # Cache preview so it's ready when user switches tab
+                            self._region_preview_showing = str(preview_path)
+                    # Handle heatmap
+                    heatmap_path = result.get("heatmap_path")
+                    if heatmap_path:
+                        heatmap_p = Path(heatmap_path)
+                        if heatmap_p.exists():
+                            if self._region_right_tab == "heatmap":
+                                self._region_display_heatmap(heatmap_p)
+                            else:
+                                # Cache the path so it's ready on tab switch
+                                self._region_heatmap_showing = str(heatmap_p)
+                            if self.region_tab_heatmap_btn:
+                                self.region_tab_heatmap_btn.config(fg=Theme.TEXT, cursor="hand2")
                 else:
                     self.region_status.set(tr(self.lang, "failed"))
                     self.region_progress.set(result.get("error", "Unknown error"))
