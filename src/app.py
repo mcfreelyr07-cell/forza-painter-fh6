@@ -23,7 +23,7 @@ import zipfile
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, X, Button, Canvas, Checkbutton, Entry, Frame, IntVar, Label, Listbox, PhotoImage, Spinbox, StringVar, Text, Tk, Toplevel, filedialog, messagebox, ttk
+from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, X, Button, Canvas, Checkbutton, DoubleVar, Entry, Frame, IntVar, Label, Listbox, PhotoImage, Spinbox, StringVar, Text, Tk, Toplevel, filedialog, messagebox, ttk
 
 import psutil
 
@@ -1101,6 +1101,9 @@ class App:
         self.region_tool = StringVar(value="rect")
         self.region_shapes: list[dict] = []
         self.region_brush_size = IntVar(value=15)
+        self.region_selected_index: int | None = None
+        self.region_rotation_var = DoubleVar(value=0)
+        self.region_rotation_display = StringVar(value="0°")
         self.region_mask: "Image.Image | None" = None
         self.region_canvas_image_ref = None
         self.region_canvas_overlay_ref = None
@@ -1736,6 +1739,24 @@ class App:
             self.translated.append((btn, key, "text"))
         self._button(tool_row, "region_tool_clear", self._region_clear_mask).pack(side=LEFT, padx=(8, 2))
 
+        # Rotation slider
+        rot_row = Frame(step3)
+        rot_row.pack(fill=X, padx=10, pady=(0, 4))
+        self.region_rotation_label = Label(rot_row, text=tr(self.lang, "region_rotation"), fg=Theme.MUTED, bg=self._parent_bg(rot_row))
+        self.region_rotation_label.pack(side=LEFT)
+        self.region_rotation_slider = Scale(
+            rot_row, from_=-180, to=180, orient=HORIZONTAL,
+            variable=self.region_rotation_var,
+            command=self._region_on_rotation_slider,
+            showvalue=False, length=120,
+        )
+        self.region_rotation_slider.pack(side=LEFT, fill=X, expand=True, padx=(4, 4))
+        self.region_rotation_value_label = Label(rot_row, textvariable=self.region_rotation_display, fg=Theme.ACCENT, bg=self._parent_bg(rot_row), width=6)
+        self.region_rotation_value_label.pack(side=LEFT)
+        # Disable rotation controls until a shape is selected
+        self.region_rotation_slider.config(state="disabled")
+        self.region_rotation_label.config(fg=Theme.MUTED)  # visually muted
+
         # Step 4 — Actions
         step4 = ttk.LabelFrame(left_outer, text=tr(self.lang, "region_step_actions"))
         self.translated.append((step4, "region_step_actions", "text"))
@@ -1811,6 +1832,7 @@ class App:
         self.region_canvas.bind("<Double-Button-1>", self._region_canvas_double_click)
         self.region_canvas.bind("<Motion>", self._region_canvas_motion)
         self.region_canvas.bind("<Configure>", self._region_canvas_configure)
+        self.region_canvas.bind("<MouseWheel>", self._region_on_mousewheel)
         self.region_canvas_right.bind("<Configure>", self._region_canvas_configure)
 
         if self.settings:
@@ -1910,6 +1932,32 @@ class App:
         self.region_tool.set(tool)
         self.region_canvas.configure(cursor="cross")
 
+    def _region_on_rotation_slider(self, _value=None):
+        if self.region_selected_index is None:
+            return
+        if self.region_selected_index >= len(self.region_shapes):
+            return
+        angle = self.region_rotation_var.get()
+        self.region_shapes[self.region_selected_index]["rotation"] = angle
+        self.region_rotation_display.set(f"{int(angle)}°")
+        self._region_redraw_overlay()
+
+    def _region_on_mousewheel(self, event):
+        if self.region_selected_index is None:
+            return
+        if self.region_selected_index >= len(self.region_shapes):
+            return
+        delta = 1 if event.delta > 0 else -1
+        shape = self.region_shapes[self.region_selected_index]
+        current = shape.get("rotation", 0)
+        step = 1 if (event.state & 0x0001) else 5
+        new_angle = current + delta * step
+        new_angle = max(-180, min(180, new_angle))
+        shape["rotation"] = new_angle
+        self.region_rotation_var.set(new_angle)
+        self.region_rotation_display.set(f"{int(new_angle)}°")
+        self._region_redraw_overlay()
+
     def _region_get_canvas_scale(self) -> float:
         """Compute scale factor: canvas-display-pixels / working-pixels."""
         if not self.region_images:
@@ -1931,6 +1979,31 @@ class App:
 
     def _region_canvas_press(self, event):
         tool = self.region_tool.get()
+        # Check if clicking on an existing shape (to select it)
+        for idx, shape in enumerate(reversed(self.region_shapes)):
+            real_idx = len(self.region_shapes) - 1 - idx
+            coords = shape.get("coords", [])
+            if len(coords) >= 4:
+                x1, y1, x2, y2 = [int(c) for c in coords[:4]]
+                x1, x2 = sorted([x1, x2])
+                y1, y2 = sorted([y1, y2])
+                if x1 <= event.x <= x2 and y1 <= event.y <= y2:
+                    self.region_selected_index = real_idx
+                    rot = shape.get("rotation", 0)
+                    self.region_rotation_var.set(rot)
+                    self.region_rotation_display.set(f"{int(rot)}°")
+                    self.region_rotation_slider.config(state="normal")
+                    self.region_rotation_label.config(fg=Theme.ACCENT)
+                    self._region_redraw_overlay()
+                    return
+        # Not clicking on a shape — deselect and start new shape
+        if self.region_selected_index is not None:
+            self.region_selected_index = None
+            self.region_rotation_var.set(0)
+            self.region_rotation_display.set("0°")
+            self.region_rotation_slider.config(state="disabled")
+            self.region_rotation_label.config(fg=Theme.MUTED)
+            self._region_redraw_overlay()
         if tool in ("rect", "ellipse"):
             self.region_drag_start = (event.x, event.y)
 
@@ -1955,7 +2028,13 @@ class App:
             x1, y1 = self.region_drag_start
             x2, y2 = event.x, event.y
             if abs(x2 - x1) > 3 and abs(y2 - y1) > 3:
-                self.region_shapes.append({"tool": tool, "coords": [x1, y1, x2, y2]})
+                idx = len(self.region_shapes)
+                self.region_shapes.append({"tool": tool, "coords": [x1, y1, x2, y2], "rotation": 0})
+                self.region_selected_index = idx
+                self.region_rotation_var.set(0)
+                self.region_rotation_display.set("0°")
+                self.region_rotation_slider.config(state="normal")
+                self.region_rotation_label.config(fg=Theme.ACCENT)
             if self.region_rubber_id:
                 self.region_canvas.delete(self.region_rubber_id)
                 self.region_rubber_id = None
@@ -1994,7 +2073,7 @@ class App:
         # Draw red overlay for each shape
         overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
-        for shape in self.region_shapes:
+        for idx, shape in enumerate(self.region_shapes):
             tool = shape.get("tool", "")
             coords = shape.get("coords", [])
             if tool in ("rect", "ellipse") and len(coords) >= 4:
@@ -2005,6 +2084,8 @@ class App:
                     draw.rectangle([x1, y1, x2, y2], fill=(255, 0, 0, 80))
                 else:
                     draw.ellipse([x1, y1, x2, y2], fill=(255, 0, 0, 80))
+                if idx == self.region_selected_index:
+                    draw.rectangle([x1 - 2, y1 - 2, x2 + 2, y2 + 2], outline=(0, 255, 0), width=2)
         img = Image.alpha_composite(img, overlay)
         self.region_canvas_image_ref = ImageTk.PhotoImage(img)
         self.region_canvas.delete("all")
@@ -2014,6 +2095,11 @@ class App:
         self.region_shapes.clear()
         self.region_poly_points.clear()
         self.region_drag_start = None
+        self.region_selected_index = None
+        self.region_rotation_var.set(0)
+        self.region_rotation_display.set("0°")
+        self.region_rotation_slider.config(state="disabled")
+        self.region_rotation_label.config(fg=Theme.MUTED)
         if self.region_rubber_id:
             self.region_canvas.delete(self.region_rubber_id)
             self.region_rubber_id = None

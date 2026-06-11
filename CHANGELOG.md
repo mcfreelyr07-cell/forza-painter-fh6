@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.8.4 / 2026-06-11
+
+- Merged shape **rotation** upstream (v1.8.4) for Rectangle and Ellipse selection tools in Region Paint. Selected shapes can be rotated via slider (-180° to 180°), mouse wheel (+/-5°, Shift+wheel for 1°), or by clicking a shape to select it. Rotation-aware mask generation uses OpenCV when available, falling back to PIL.
+- Added new config preset `0. Especially nutritious.ini` for high-quality faster generation.
+- Added `AGENTS.md` documenting fork-specific performance enhancements to preserve across upstream merges.
+
 ## v1.8.3 / 2026-06-06
 
 - Added a **Heatmap** tab to the Region Paint right canvas. After each pass (First Pass / Paint Selected Region) a shape-density heatmap is automatically generated from the geometry JSON and displayed alongside the rendered preview. The two tabs share a cache so switching is instant.
