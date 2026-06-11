@@ -795,7 +795,7 @@ def render_typecode_json(path, max_size=None):
         tile = max(8, int(round(32 * render_scale)))
         np_mod = load_numpy()
         if np_mod is not None:
-            pattern = np_mod.full((tile * 2, tile * 2, 3), (38, 38, 38), dtype=np.uint8)
+            pattern = np_mod.full((tile * 2, tile * 2, 3), (38, 38, 38), dtype=np_mod.uint8)
             pattern[:tile, :tile] = (58, 58, 58)
             pattern[tile:, tile:] = (58, 58, 58)
             full = np_mod.tile(pattern, (math.ceil(render_h / (tile * 2)), math.ceil(render_w / (tile * 2)), 1))
@@ -935,7 +935,7 @@ def render_geometry_json_pillow(path, max_size=None):
             np_mod = load_numpy()
             if np_mod is not None:
                 tile = max(8, int(round(32 * render_scale)))
-                pattern = np_mod.full((tile * 2, tile * 2, 3), (38, 38, 38), dtype=np.uint8)
+                pattern = np_mod.full((tile * 2, tile * 2, 3), (38, 38, 38), dtype=np_mod.uint8)
                 pattern[:tile, :tile] = (58, 58, 58)
                 pattern[tile:, tile:] = (58, 58, 58)
                 full = np_mod.tile(pattern, (math.ceil(render_h / (tile * 2)), math.ceil(render_w / (tile * 2)), 1))
