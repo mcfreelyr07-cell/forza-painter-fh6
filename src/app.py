@@ -37,6 +37,8 @@ from fh6_vinyl_resources import load_vinyl_polygons
 from game_profiles import PROFILES
 from geometry_json import RECTANGLE, ROTATED_ELLIPSE, load_normalized_geometry
 from generator_backend import GENERATOR_EXE, GENERATOR_JSON_SCAN_SECONDS, GENERATOR_POLL_SLEEP_SECONDS, GENERATOR_PREVIEW_SCAN_SECONDS, USER_SETTINGS_DIR, best_geometry_jsons, build_generator_command, build_generator_env, generated_jsons, generated_preview_files, generator_preview_path, load_settings, preprocess_input_image, write_custom_settings, write_user_settings_preset
+from PIL import Image as PILImage
+
 from region_painter.workflow import (
     finalize_first_pass,
     finalize_region_pass,
@@ -1104,7 +1106,7 @@ class App:
         self.region_selected_index: int | None = None
         self.region_rotation_var = DoubleVar(value=0)
         self.region_rotation_display = StringVar(value="0°")
-        self.region_mask: "Image.Image | None" = None
+        self.region_mask: PILImage.Image | None = None
         self.region_canvas_image_ref = None
         self.region_canvas_overlay_ref = None
         self._region_cached_pil = None       # cached full-res PIL image
@@ -2108,7 +2110,7 @@ class App:
             self._region_display_image(self.region_images[0])
         self._region_update_button_states()
 
-    def _region_generate_mask(self) -> "Image.Image | None":
+    def _region_generate_mask(self) -> PILImage.Image | None:
         """Convert canvas shapes to a PIL 'L' mask at working resolution."""
         if not self.region_shapes or not self.region_images:
             return None
